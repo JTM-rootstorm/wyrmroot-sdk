@@ -2,7 +2,8 @@
 /*
  * First light for the SDK: a static musl program. It allocates through
  * malloc (anonymous mmap), formats an integer and a double (SSE, SysV
- * psABI) and writes through stdio to its stdout stream.
+ * psABI) and writes through stdio to its stdout stream. The 8 MiB block is
+ * one mapping of over 2048 pages, which Deepwyrm maps in one call since D7.
  */
 #include <errno.h>
 #include <stdio.h>
@@ -13,7 +14,7 @@
 int main(int argc, char **argv)
 {
 	(void)argv;
-	size_t size = 256 * 1024;
+	size_t size = 8 * 1024 * 1024;
 	unsigned char *block = malloc(size);
 	if (!block) {
 		int malloc_error = errno;

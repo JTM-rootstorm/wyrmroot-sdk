@@ -67,13 +67,12 @@ local generator = coroutine.wrap(function()
 end)
 check(generator() == 1 and generator() == 4 and generator() == 9, "coroutines")
 
--- Memory: build and drop about a megabyte, then collect. (A job's heap is
--- about 4 MiB until Deepwyrm maps larger arenas.)
+-- Memory: build and drop a few megabytes, then collect.
 local before = collectgarbage("count")
 do
   local junk = {}
-  for i = 1, 8000 do junk[i] = string.rep("x", 100) .. i end
-  check(#junk[8000] == 104, "allocation")
+  for i = 1, 20000 do junk[i] = string.rep("x", 100) .. i end
+  check(#junk[20000] == 105, "allocation")
 end
 collectgarbage("collect")
 check(collectgarbage("count") < before + 1024, "collection")
