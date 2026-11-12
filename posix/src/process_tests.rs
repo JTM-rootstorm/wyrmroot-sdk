@@ -839,3 +839,57 @@ fn a_lock_without_room_for_its_channel_is_enolck() {
     );
     assert_eq!(fake.locks.table().iter().count(), 0);
 }
+
+/// Every node Channel the process closed was ended by CLOSE first, so the
+/// server's end was gone before its own (WRFS 1.3).
+fn every_closed_node_was_ended(fake: &Fake) {
+    let closed: Vec<_> = fake
+        .closed()
+        .iter()
+        .filter(|handle| fake.node_channels.contains(&handle.0))
+        .collect();
+    assert!(!closed.is_empty());
+    for handle in closed {
+        assert!(
+            fake.ended.contains(handle),
+            "{handle:?} closed without CLOSE"
+        );
+    }
+}
+
+#[test]
+fn closing_a_node_ends_it_on_the_server_first() {
+    // dev-boot 2026-11-12: the server's end of a closed node counted against
+    // the job until the server noticed, so SQLite's journal delete, which
+    // opens right after a close, got EMFILE.
+    let (mut fake, mut process) = setup();
+    let fd = open(&mut fake, &mut process, "/journal", O_RDWR | O_CREAT).unwrap();
+    let mut flock = Flock {
+        l_type: F_WRLCK,
+        l_whence: SEEK_SET as i16,
+        ..Flock::default()
+    };
+    assert_eq!(
+        process.fcntl_lock(&mut fake, fd, F_SETLK, &mut flock),
+        Ok(0)
+    );
+    assert_eq!(process.close(&mut fake, fd), Ok(0));
+    // unlinkat opens the target to check its kind, then the parent.
+    assert_eq!(process.unlinkat(&mut fake, AT_FDCWD, b"/journal", 0), Ok(0));
+    assert!(fake.file("/journal").is_none());
+    every_closed_node_was_ended(&fake);
+    // The descriptor's node, its lock Channel, and unlinkat's two.
+    assert_eq!(fake.ended.len(), 4);
+}
+
+#[test]
+fn a_server_that_ignores_close_delays_close_by_the_bound_only() {
+    let (mut fake, mut process) = setup();
+    fake.ignore_close = true;
+    let fd = open(&mut fake, &mut process, "/file", O_RDWR | O_CREAT).unwrap();
+    let before = fake.clock;
+    assert_eq!(process.close(&mut fake, fd), Ok(0));
+    assert_eq!(fake.clock, before + crate::node::CLOSE_WAIT_NS);
+    assert!(fake.ended.is_empty());
+    assert_eq!(fake.closed().len(), 1, "the Channel is still closed");
+}

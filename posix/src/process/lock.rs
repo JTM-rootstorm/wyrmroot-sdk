@@ -108,7 +108,7 @@ impl Process {
                 Ok(done)
             }
             Err(error) => {
-                let _ = native.close(channel);
+                let _ = node::close(native, channel, &mut self.scratch);
                 Err(error)
             }
         }
@@ -289,6 +289,6 @@ impl Process {
         }
         // Closing the Channel releases whatever it still held.
         self.lock_owners[slot] = None;
-        let _ = native.close(channel);
+        let _ = node::close(native, channel, &mut self.scratch);
     }
 }

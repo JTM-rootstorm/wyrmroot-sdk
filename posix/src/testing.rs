@@ -67,6 +67,12 @@ pub struct Fake {
     pub release_when_waited: Option<u64>,
     /// The filesystem has no node slot for an OPEN of a node again.
     pub refuse_reopen: bool,
+    /// Every node Channel the filesystem ever opened.
+    pub node_channels: HashSet<u64>,
+    /// The nodes CLOSE ended, in order (WRFS 1.3).
+    pub ended: Vec<DwHandle>,
+    /// The filesystem ignores CLOSE, as a stalled server would.
+    pub ignore_close: bool,
 }
 
 impl Fake {
@@ -263,6 +269,7 @@ impl Fake {
         let transaction = message.transaction_id + u64::from(self.wrong_open_transaction);
         match self.open(flags, path) {
             Ok(attr) => {
+                self.node_channels.insert(client);
                 self.nodes.insert(
                     client,
                     OpenNode {
@@ -295,6 +302,14 @@ impl Fake {
         let write = self.nodes[&client].write;
         let status = |status| Body::Status { status, value: 0 };
         match message.body {
+            // The node goes, with its locks, and the server's end closes.
+            Body::Close if !self.ignore_close => {
+                self.ended.push(DwHandle(client));
+                self.nodes.remove(&client);
+                self.locks.release(client);
+                self.peer_closed.insert(client);
+            }
+            Body::Close => {}
             Body::GetAttr => {
                 let attr = self.attr(&path, write).unwrap();
                 self.reply(client, id, Body::Attr(attr));
@@ -414,6 +429,7 @@ impl Fake {
                         },
                     );
                 }
+                self.node_channels.insert(new_client);
                 self.nodes.insert(
                     new_client,
                     OpenNode {

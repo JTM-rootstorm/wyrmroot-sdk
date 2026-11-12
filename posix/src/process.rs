@@ -222,7 +222,7 @@ impl Process {
                 } else {
                     Ok(())
                 };
-                let closed = native.close(node.channel).map_err(|_| EIO);
+                let closed = node::close(native, node.channel, &mut self.scratch).map_err(|_| EIO);
                 synced.and(closed)
             }
         }
@@ -557,7 +557,7 @@ impl Process {
         let (channel, attr) = self.open_node(native, wrfs, path)?;
         let directory = attr.kind == Kind::Directory;
         if directory && wrfs & OPEN_WRITE != 0 {
-            let _ = native.close(channel);
+            let _ = node::close(native, channel, &mut self.scratch);
             return Err(EISDIR);
         }
         let mut stored = [0u8; MAX_PATH_BYTES];
@@ -633,7 +633,7 @@ impl Process {
             return Ok(0);
         }
         let (channel, attr) = self.open_node(native, OPEN_READ, path)?;
-        let _ = native.close(channel);
+        let _ = node::close(native, channel, &mut self.scratch);
         fill_stat(out, &attr, attr.id);
         Ok(0)
     }
@@ -661,7 +661,7 @@ impl Process {
             OPEN_READ
         };
         let (channel, _) = self.open_node(native, wrfs, path)?;
-        let _ = native.close(channel);
+        let _ = node::close(native, channel, &mut self.scratch);
         Ok(0)
     }
 
@@ -685,7 +685,7 @@ impl Process {
             &mut self.scratch,
             wyrmroot_fs_proto::node::Body::Sync,
         );
-        let _ = native.close(channel);
+        let _ = node::close(native, channel, &mut self.scratch);
         synced.map(|_| 0)
     }
 
@@ -711,7 +711,7 @@ impl Process {
         }
         // POSIX tells files and directories apart here; WRFS UNLINK does not.
         let (target, attr) = self.open_node(native, OPEN_READ, path)?;
-        let _ = native.close(target);
+        let _ = node::close(native, target, &mut self.scratch);
         match (attr.kind, remove_directory) {
             (Kind::Directory, false) => return Err(EISDIR),
             (Kind::File, true) => return Err(ENOTDIR),
@@ -744,7 +744,7 @@ impl Process {
                 wyrmroot_fs_proto::node::Body::Sync,
             )
         });
-        let _ = native.close(directory);
+        let _ = node::close(native, directory, &mut self.scratch);
         result.map(|_| 0)
     }
 
@@ -763,7 +763,7 @@ impl Process {
         let normalized = self.resolve(AT_FDCWD, input, &mut buffer)?;
         let path = &buffer[..normalized.length];
         let (channel, _) = self.open_node(native, OPEN_READ | OPEN_DIRECTORY, path)?;
-        let _ = native.close(channel);
+        let _ = node::close(native, channel, &mut self.scratch);
         self.cwd[..path.len()].copy_from_slice(path);
         self.cwd_length = path.len();
         Ok(0)

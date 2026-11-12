@@ -189,10 +189,44 @@ fn finish_open<N: Native>(
     match outcome {
         Ok(attr) => Ok((client, attr)),
         Err(error) => {
-            let _ = native.close(client);
+            let _ = close(native, client, scratch);
             Err(error)
         }
     }
+}
+
+/// How long [`close`] waits for the server to close its end.
+pub const CLOSE_WAIT_NS: u64 = 1_000_000_000;
+
+/// Ends the node `channel` names and closes the Channel (WRFS 1.3 CLOSE).
+///
+/// The server drops the node, with its locks, and closes its end; waiting
+/// for that means both ends, and the job's charge for them, are gone when
+/// this returns. Otherwise the server's end would count against the job's
+/// Channel budget until the server noticed this end close, so an open right
+/// after a close could fail with `EMFILE` (dev-boot 2026-11-12). A server
+/// that has not closed its end by [`CLOSE_WAIT_NS`] still drops the node
+/// once it sees this end close.
+pub fn close<N: Native>(
+    native: &mut N,
+    channel: DwHandle,
+    scratch: &mut Scratch,
+) -> core::result::Result<(), DwStatus> {
+    let transaction = scratch.next_transaction();
+    let sent = node::encode(
+        &node::Message {
+            transaction_id: transaction,
+            body: Body::Close,
+        },
+        &mut scratch.request,
+    )
+    .ok()
+    .is_some_and(|size| native.send(channel, &scratch.request[..size], &[]).is_ok());
+    if sent && let Ok(now) = native.now() {
+        let deadline = DwDeadline(now.saturating_add(CLOSE_WAIT_NS));
+        let _ = native.wait(channel, DW_SIGNAL_PEER_CLOSED, deadline);
+    }
+    native.close(channel)
 }
 
 /// Sends one WRFS request on `channel`; the reply's length in
