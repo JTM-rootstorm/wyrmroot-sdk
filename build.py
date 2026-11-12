@@ -64,13 +64,12 @@ ZLIB_SOURCES = (
 )
 # Lua's interpreter: every source but the compiler's.
 LUA_EXCLUDED = {"luac.c"}
-# SQLite for Wyrmroot: one thread, no loadable extensions, no file mmap (the
-# layer has none), and dot-file locks, since there are no POSIX record locks
-# yet (TOOLCHAIN_POSIX_LAYER_DESIGN.md §8, W10). usleep is in musl.
+# SQLite for Wyrmroot: one thread, no loadable extensions and no file mmap
+# (the layer has none). Its default unix VFS locks with POSIX record locks
+# over WRFS 1.1 (TOOLCHAIN_POSIX_LAYER_DESIGN.md §8, W10). usleep is in musl.
 SQLITE_FLAGS = (
     "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_MAX_MMAP_SIZE=0",
-    '-DSQLITE_DEFAULT_UNIX_VFS="unix-dotfile"', "-DSQLITE_ENABLE_MATH_FUNCTIONS",
-    "-DHAVE_USLEEP=1",
+    "-DSQLITE_ENABLE_MATH_FUNCTIONS", "-DHAVE_USLEEP=1",
 )
 
 

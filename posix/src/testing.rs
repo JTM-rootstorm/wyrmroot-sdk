@@ -6,6 +6,7 @@
 use crate::native::{Native, Received};
 use deepwyrm_syscall::*;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use wyrmroot_fs_lock::{LockError, LockTable};
 use wyrmroot_fs_proto::node::{self, Attr, Body, EntryWriter, Kind};
 use wyrmroot_fs_proto::{
     OPEN_CREATE, OPEN_DIRECTORY, OPEN_EXCLUSIVE, OPEN_FILE, OPEN_TRUNCATE, OPEN_WRITE, Status,
@@ -16,6 +17,8 @@ pub const NAMESPACE: DwHandle = DwHandle(0x5000);
 pub const ROOT: DwHandle = DwHandle(0x6000);
 /// Entries per DIRENTS page, small so listings span pages.
 pub const PAGE_ENTRIES: usize = 2;
+/// The filesystem identity the fake's nodes carry.
+pub const FILESYSTEM: u64 = 0xf5;
 
 #[derive(Clone, Debug)]
 pub enum FsNode {
@@ -53,6 +56,12 @@ pub struct Fake {
     pub map_limit: Option<u64>,
     /// The filesystem answers OPEN with another transaction's id.
     pub wrong_open_transaction: bool,
+    /// The filesystem's locks, owned by node Channels (and by whatever
+    /// owner a test adds to stand for another process).
+    pub locks: LockTable<64>,
+    /// At this clock reading, a sleep releases this lock owner's locks, as
+    /// another process unlocking would.
+    pub release_at: Option<(u64, u64)>,
 }
 
 impl Fake {
@@ -169,12 +178,14 @@ impl Fake {
                 access,
                 size: 0,
                 id,
+                filesystem: FILESYSTEM,
             },
             FsNode::File(bytes) => Attr {
                 kind: Kind::File,
                 access,
                 size: bytes.len() as u64,
                 id,
+                filesystem: FILESYSTEM,
             },
         })
     }
@@ -263,16 +274,17 @@ impl Fake {
                     },
                 );
             }
-            Err(status) => self.reply(
-                client,
-                transaction,
-                Body::OnOpen { status, attr: None },
-            ),
+            Err(status) => self.reply(client, transaction, Body::OnOpen { status, attr: None }),
         }
     }
 
-    fn serve_node(&mut self, client: u64, bytes: &[u8]) {
-        let message = node::parse(bytes, 0).expect("valid WRFS");
+    /// The lock key of the file at `path`.
+    pub fn file_id(&self, path: &str) -> u64 {
+        self.attr(path.as_bytes(), false).unwrap().id
+    }
+
+    fn serve_node(&mut self, client: u64, bytes: &[u8], transfers: &[DwHandleTransferV1]) {
+        let message = node::parse(bytes, transfers.len()).expect("valid WRFS");
         let id = message.transaction_id;
         let path = self.nodes[&client].path.clone();
         let write = self.nodes[&client].write;
@@ -367,6 +379,56 @@ impl Fake {
                 self.syncs += 1;
                 self.reply(client, id, status(Status::Ok));
             }
+            // Only this node again: what the POSIX layer's lock Channels
+            // use. Access never grows.
+            Body::Open { flags, path: b"" } => {
+                let opened = transfers[0].handle.0;
+                let new_client = self.peers[&opened];
+                let wants_write = flags & OPEN_WRITE != 0;
+                if wants_write && !write {
+                    return self.reply(
+                        new_client,
+                        id,
+                        Body::OnOpen {
+                            status: Status::AccessDenied,
+                            attr: None,
+                        },
+                    );
+                }
+                self.nodes.insert(
+                    new_client,
+                    OpenNode {
+                        path: path.clone(),
+                        write: wants_write,
+                    },
+                );
+                let attr = self.attr(&path, wants_write).unwrap();
+                self.reply(
+                    new_client,
+                    id,
+                    Body::OnOpen {
+                        status: Status::Ok,
+                        attr: Some(attr),
+                    },
+                );
+            }
+            Body::Lock(lock) => {
+                let file = self.attr(&path, false).unwrap().id;
+                let result = match self.locks.set(file, client, lock) {
+                    Ok(()) => Status::Ok,
+                    Err(LockError::Conflict) => Status::Busy,
+                    Err(LockError::NoRoom) => Status::NoResources,
+                };
+                self.reply(client, id, status(result));
+            }
+            Body::TestLock(lock) => {
+                let file = self.attr(&path, false).unwrap().id;
+                let held = self
+                    .locks
+                    .conflict(file, client, lock)
+                    .map(|held| held.lock());
+                self.reply(client, id, Body::LockInfo(held));
+            }
             _ => self.reply(client, id, status(Status::NotSupported)),
         }
     }
@@ -391,7 +453,7 @@ impl Native for Fake {
         if channel == NAMESPACE && self.fs.is_some() {
             self.serve_namespace(bytes, transfers);
         } else if self.nodes.contains_key(&channel.0) {
-            self.serve_node(channel.0, bytes);
+            self.serve_node(channel.0, bytes, transfers);
         } else {
             self.sent.entry(channel.0).or_default().push(bytes.to_vec());
         }
@@ -454,12 +516,19 @@ impl Native for Fake {
             "the fake would wait forever"
         );
         self.clock = self.clock.max(deadline.0);
+        if let Some((at, owner)) = self.release_at
+            && self.clock >= at
+        {
+            self.locks.release(owner);
+            self.release_at = None;
+        }
         Err(DW_STATUS_TIMED_OUT)
     }
 
     fn close(&mut self, handle: DwHandle) -> Result<(), DwStatus> {
         self.closed.push(handle);
         self.nodes.remove(&handle.0);
+        self.locks.release(handle.0);
         Ok(())
     }
 

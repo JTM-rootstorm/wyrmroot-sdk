@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 //! Files and directories through `vfsd` (root
-//! `TOOLCHAIN_POSIX_LAYER_DESIGN.md` §4, Wyrmroot WRNS/WRFS 1.0).
+//! `TOOLCHAIN_POSIX_LAYER_DESIGN.md` §4, Wyrmroot WRNS/WRFS 1.1).
 //!
 //! A path opens with one WRNS OPEN on the namespace Channel, carrying the
 //! server end of a new Channel; the filesystem answers ON_OPEN on the other
@@ -112,6 +112,58 @@ pub fn open<N: Native>(
             EIO
         });
     }
+    finish_open(native, client, scratch, transaction)
+}
+
+/// Opens the node `channel` names again, with WRFS `flags`, onto a new
+/// Channel: another description of the same file.
+pub fn reopen<N: Native>(
+    native: &mut N,
+    channel: DwHandle,
+    scratch: &mut Scratch,
+    flags: u32,
+) -> Result<DwHandle> {
+    let transaction = scratch.next_transaction();
+    let size = node::encode(
+        &node::Message {
+            transaction_id: transaction,
+            body: Body::Open { flags, path: b"" },
+        },
+        &mut scratch.request,
+    )
+    .map_err(|_| crate::errno::EINVAL)?;
+    let (client, server) = native.create_channel(NODE_RIGHTS).map_err(|status| {
+        if status == DW_STATUS_NO_RESOURCES {
+            crate::errno::EMFILE
+        } else {
+            from_status(status)
+        }
+    })?;
+    let transfer = DwHandleTransferV1 {
+        handle: server,
+        requested_rights: NODE_RIGHTS,
+        operation: DW_HANDLE_TRANSFER_MOVE,
+        ..DwHandleTransferV1::default()
+    };
+    if native
+        .send(channel, &scratch.request[..size], &[transfer])
+        .is_err()
+    {
+        let _ = native.close(client);
+        let _ = native.close(server);
+        return Err(EIO);
+    }
+    finish_open(native, client, scratch, transaction).map(|(client, _)| client)
+}
+
+/// Waits for ON_OPEN on `client`; the Channel and attributes, or the
+/// Channel closed and the error.
+fn finish_open<N: Native>(
+    native: &mut N,
+    client: DwHandle,
+    scratch: &mut Scratch,
+    transaction: u64,
+) -> Result<(DwHandle, Attr)> {
     let outcome = receive(native, client, scratch).and_then(|used| {
         match node::parse(&scratch.reply[..used], 0) {
             Ok(message) if message.transaction_id != transaction => Err(EIO),

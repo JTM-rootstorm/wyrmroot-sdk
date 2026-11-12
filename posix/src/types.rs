@@ -103,6 +103,26 @@ pub const F_SETFD: i32 = 2;
 pub const F_GETFL: i32 = 3;
 pub const F_SETFL: i32 = 4;
 pub const F_DUPFD_CLOEXEC: i32 = 1030;
+pub const F_GETLK: i32 = 5;
+pub const F_SETLK: i32 = 6;
+pub const F_SETLKW: i32 = 7;
+pub const F_OFD_GETLK: i32 = 36;
+pub const F_OFD_SETLK: i32 = 37;
+pub const F_OFD_SETLKW: i32 = 38;
+pub const F_RDLCK: i16 = 0;
+pub const F_WRLCK: i16 = 1;
+pub const F_UNLCK: i16 = 2;
+
+/// musl's `struct flock` for x86_64.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Flock {
+    pub l_type: i16,
+    pub l_whence: i16,
+    pub l_start: i64,
+    pub l_len: i64,
+    pub l_pid: i32,
+}
 pub const FD_CLOEXEC: i32 = 1;
 
 pub const SEEK_SET: i32 = 0;

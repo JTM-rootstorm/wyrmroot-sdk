@@ -389,7 +389,15 @@ exports! {
     }
 
     fn __wr_fcntl(file: c_int, command: c_int, argument: c_ulong) -> c_long {
-        r(with(|process, _| process.fcntl(fd(file), command, argument)))
+        r((|| match command {
+            F_GETLK | F_SETLK | F_SETLKW | F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW => {
+                // SAFETY: forwarded from the caller's contract: these
+                // commands take a `struct flock *`.
+                let flock = unsafe { user_ref(argument as *mut Flock)? };
+                with(|process, kernel| process.fcntl_lock(kernel, fd(file), command, flock))
+            }
+            _ => with(|process, _| process.fcntl(fd(file), command, argument)),
+        })())
     }
 
     fn __wr_ioctl(file: c_int, request: c_ulong, argument: *mut c_void) -> c_long {

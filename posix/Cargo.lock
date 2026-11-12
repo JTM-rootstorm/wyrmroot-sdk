@@ -16,6 +16,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wyrmroot-fs-lock"
+version = "0.0.0"
+dependencies = [
+ "wyrmroot-fs-proto",
+]
+
+[[package]]
 name = "wyrmroot-fs-proto"
 version = "0.0.0"
 
@@ -24,6 +31,7 @@ name = "wyrmroot-posix"
 version = "0.0.0"
 dependencies = [
  "deepwyrm-syscall",
+ "wyrmroot-fs-lock",
  "wyrmroot-fs-proto",
  "wyrmroot-startup-proto",
  "wyrmroot-stream-proto",

@@ -26,6 +26,10 @@ pub const PAGE_SIZE: u64 = 4096;
 pub const CLOCK_RESOLUTION_NS: i64 = 1000;
 const NULL_PATH: &[u8] = b"/dev/null";
 
+mod lock;
+use lock::LockOwner;
+pub use lock::MAX_LOCKED_FILES;
+
 pub struct NodeFile {
     pub channel: DwHandle,
     pub directory: bool,
@@ -37,6 +41,8 @@ pub struct NodeFile {
     /// Entries returned so far, for `d_off` and synthetic `d_ino`.
     returned: u64,
     id: u64,
+    /// The filesystem identity from the node's attributes (`st_dev`).
+    filesystem: u64,
     dirty: bool,
     path: PathBuf,
     path_length: usize,
@@ -80,6 +86,9 @@ pub struct Process {
     /// deadline.
     sleeper: Option<(DwHandle, DwHandle)>,
     arenas: Arenas,
+    /// One lock Channel per file this process holds POSIX record locks on
+    /// (W10).
+    lock_owners: [Option<LockOwner>; MAX_LOCKED_FILES],
 }
 
 impl Default for Process {
@@ -100,6 +109,7 @@ impl Process {
             cwd_length: 0,
             sleeper: None,
             arenas: Arenas::new(),
+            lock_owners: [None; MAX_LOCKED_FILES],
         }
     }
 
@@ -219,10 +229,13 @@ impl Process {
     }
 
     pub fn close<N: Native>(&mut self, native: &mut N, fd: i32) -> Result<usize> {
-        match self.files.close(fd)? {
+        let file = self.file_identity(fd);
+        let result = match self.files.close(fd)? {
             Some(file) => self.release(native, file).map(|()| 0),
             None => Ok(0),
-        }
+        };
+        self.closed_file(native, file);
+        result
     }
 
     pub fn dup(&mut self, fd: i32) -> Result<usize> {
@@ -239,11 +252,17 @@ impl Process {
         if flags & !O_CLOEXEC != 0 {
             return Err(EINVAL);
         }
+        let replaced = if old == new {
+            None
+        } else {
+            self.file_identity(new)
+        };
         let (fd, released) = self.files.dup_to(old, new, flags & O_CLOEXEC != 0)?;
         if let Some(file) = released {
             // POSIX dup2 ignores errors closing the replaced descriptor.
             let _ = self.release(native, file);
         }
+        self.closed_file(native, replaced);
         Ok(fd as usize)
     }
 
@@ -552,6 +571,7 @@ impl Process {
                 ended: false,
                 returned: 0,
                 id: attr.id,
+                filesystem: attr.filesystem,
                 dirty: flags & O_TRUNC != 0 && !directory,
                 path: stored,
                 path_length: path.len(),
@@ -1027,6 +1047,7 @@ impl Process {
 }
 
 fn fill_stat(out: &mut Kstat, attr: &Attr, id: u64) {
+    out.st_dev = attr.filesystem;
     out.st_ino = if id != 0 { id } else { 1 };
     match attr.kind {
         Kind::Directory => out.st_mode = S_IFDIR | 0o755,

@@ -4,9 +4,10 @@
 
 use crate::errno::*;
 use crate::process::Process;
-use crate::testing::{Fake, FsNode, NAMESPACE, ROOT};
+use crate::testing::{FILESYSTEM, Fake, FsNode, NAMESPACE, ROOT};
 use crate::types::*;
 use deepwyrm_syscall::*;
+use wyrmroot_fs_proto::node::{Lock, LockMode};
 
 fn setup() -> (Fake, Box<Process>) {
     let fake = Fake::with_filesystem();
@@ -545,4 +546,222 @@ fn an_open_answered_for_another_transaction_fails_closed() {
     assert_eq!(open(&mut fake, &mut process, "/f", O_RDONLY), Err(EIO));
     // The new node Channel is closed, not leaked.
     assert_eq!(fake.closed().len(), closed + 1);
+}
+
+// ---- record locks (W10) -------------------------------------------------
+
+/// The lock owner standing for another process.
+const OTHER: u64 = 0xdead;
+
+fn flock(l_type: i16, l_start: i64, l_len: i64) -> Flock {
+    Flock {
+        l_type,
+        l_whence: SEEK_SET as i16,
+        l_start,
+        l_len,
+        l_pid: 0,
+    }
+}
+
+fn other_locks(fake: &mut Fake, path: &str, lock: Lock) -> bool {
+    let file = fake.file_id(path);
+    fake.locks.set(file, OTHER, lock).is_ok()
+}
+
+fn whole(mode: LockMode) -> Lock {
+    Lock {
+        start: 0,
+        length: 0,
+        mode,
+    }
+}
+
+#[test]
+fn classic_locks_belong_to_the_process_and_go_with_any_close() {
+    let (mut fake, mut process) = setup();
+    fake.put("/db", FsNode::File(vec![0; 100]));
+    let first = open(&mut fake, &mut process, "/db", O_RDWR).unwrap();
+    let second = open(&mut fake, &mut process, "/db", O_RDONLY).unwrap();
+    let mut stat = Kstat::default();
+    process.fstat(&mut fake, first, &mut stat).unwrap();
+    assert_eq!(stat.st_dev, FILESYSTEM);
+
+    // Two descriptions in one process never conflict.
+    let mut write = flock(F_WRLCK, 0, 10);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, first, F_SETLK, &mut write),
+        Ok(0)
+    );
+    let mut read = flock(F_RDLCK, 5, 10);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, second, F_SETLK, &mut read),
+        Ok(0)
+    );
+    // The process sees no conflict with itself; another process does.
+    let mut probe = flock(F_WRLCK, 0, 0);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, second, F_GETLK, &mut probe),
+        Ok(0)
+    );
+    assert_eq!(probe.l_type, F_UNLCK);
+    assert!(!other_locks(&mut fake, "/db", whole(LockMode::Shared)));
+    assert!(other_locks(
+        &mut fake,
+        "/db",
+        Lock {
+            start: 50,
+            length: 10,
+            mode: LockMode::Exclusive,
+        }
+    ));
+    let mut probe = flock(F_RDLCK, 0, 0);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, first, F_GETLK, &mut probe),
+        Ok(0)
+    );
+    assert_eq!(
+        (probe.l_type, probe.l_start, probe.l_len, probe.l_pid),
+        (F_WRLCK, 50, 10, -1)
+    );
+    let mut blocked = flock(F_RDLCK, 55, 1);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, first, F_SETLK, &mut blocked),
+        Err(EAGAIN)
+    );
+    fake.locks.release(OTHER);
+
+    // Closing either descriptor releases every lock on the file, and the
+    // lock Channel goes with the last description.
+    let closed = fake.closed().len();
+    assert_eq!(process.close(&mut fake, second), Ok(0));
+    assert_eq!(fake.closed().len(), closed + 1, "only the descriptor");
+    assert!(other_locks(&mut fake, "/db", whole(LockMode::Exclusive)));
+    fake.locks.release(OTHER);
+    let mut again = flock(F_WRLCK, 0, 0);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, first, F_SETLK, &mut again),
+        Ok(0)
+    );
+    assert_eq!(process.close(&mut fake, first), Ok(0));
+    assert_eq!(
+        fake.closed().len(),
+        closed + 3,
+        "the descriptor and the lock Channel"
+    );
+    assert_eq!(fake.locks.iter().count(), 0);
+}
+
+#[test]
+fn lock_requests_are_checked_against_the_descriptor() {
+    let (mut fake, mut process) = setup();
+    fake.put("/db", FsNode::File(vec![0; 100]));
+    let reader = open(&mut fake, &mut process, "/db", O_RDONLY).unwrap();
+    let writer = open(&mut fake, &mut process, "/db", O_WRONLY).unwrap();
+    for (fd, mut request, error) in [
+        (reader, flock(F_WRLCK, 0, 1), EBADF),
+        (writer, flock(F_RDLCK, 0, 1), EBADF),
+        (reader, flock(7, 0, 1), EINVAL),
+        (reader, flock(F_RDLCK, -1, 1), EINVAL),
+        (reader, flock(F_RDLCK, 0, -1), EINVAL),
+        (reader, flock(F_RDLCK, i64::MAX, 2), EOVERFLOW),
+    ] {
+        assert_eq!(
+            process.fcntl_lock(&mut fake, fd, F_SETLK, &mut request),
+            Err(error),
+            "{request:?}"
+        );
+    }
+    let mut unlock = flock(F_UNLCK, 0, 0);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, reader, F_GETLK, &mut unlock),
+        Err(EINVAL)
+    );
+    assert_eq!(
+        process.fcntl_lock(&mut fake, reader, F_SETLK, &mut unlock),
+        Ok(0)
+    );
+    // SEEK_CUR with a negative length locks the bytes before the offset.
+    assert_eq!(process.lseek(&mut fake, reader, 40, SEEK_SET), Ok(40));
+    let mut before = Flock {
+        l_whence: SEEK_CUR as i16,
+        ..flock(F_RDLCK, 0, -30)
+    };
+    assert_eq!(
+        process.fcntl_lock(&mut fake, reader, F_SETLK, &mut before),
+        Ok(0)
+    );
+    let held: Vec<_> = fake
+        .locks
+        .iter()
+        .map(|held| (held.start, held.end))
+        .collect();
+    assert_eq!(held, [(10, 40)]);
+}
+
+#[test]
+fn description_locks_conflict_between_descriptions_but_not_duplicates() {
+    let (mut fake, mut process) = setup();
+    fake.put("/db", FsNode::File(Vec::new()));
+    let first = open(&mut fake, &mut process, "/db", O_RDWR).unwrap();
+    let copy = process.dup(first).unwrap() as i32;
+    let second = open(&mut fake, &mut process, "/db", O_RDWR).unwrap();
+    let mut write = flock(F_WRLCK, 0, 0);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, first, F_OFD_SETLK, &mut write),
+        Ok(0)
+    );
+    assert_eq!(
+        process.fcntl_lock(&mut fake, copy, F_OFD_SETLK, &mut write),
+        Ok(0)
+    );
+    assert_eq!(
+        process.fcntl_lock(&mut fake, second, F_OFD_SETLK, &mut write),
+        Err(EAGAIN)
+    );
+    let mut probe = flock(F_RDLCK, 0, 0);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, second, F_OFD_GETLK, &mut probe),
+        Ok(0)
+    );
+    assert_eq!((probe.l_type, probe.l_pid), (F_WRLCK, -1));
+    let mut with_pid = Flock {
+        l_pid: 1,
+        ..flock(F_RDLCK, 0, 0)
+    };
+    assert_eq!(
+        process.fcntl_lock(&mut fake, second, F_OFD_GETLK, &mut with_pid),
+        Err(EINVAL)
+    );
+    // The description goes with its last descriptor, and its locks with it.
+    assert_eq!(process.close(&mut fake, first), Ok(0));
+    assert_eq!(
+        process.fcntl_lock(&mut fake, second, F_OFD_SETLK, &mut write),
+        Err(EAGAIN)
+    );
+    assert_eq!(process.close(&mut fake, copy), Ok(0));
+    assert_eq!(
+        process.fcntl_lock(&mut fake, second, F_OFD_SETLK, &mut write),
+        Ok(0)
+    );
+}
+
+#[test]
+fn a_waiting_lock_is_taken_once_the_holder_lets_go() {
+    let (mut fake, mut process) = setup();
+    fake.put("/db", FsNode::File(Vec::new()));
+    let fd = open(&mut fake, &mut process, "/db", O_RDWR).unwrap();
+    assert!(other_locks(&mut fake, "/db", whole(LockMode::Exclusive)));
+    fake.release_at = Some((fake.clock + 30_000_000, OTHER));
+    let start = fake.clock;
+    let mut write = flock(F_WRLCK, 0, 0);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, fd, F_SETLKW, &mut write),
+        Ok(0)
+    );
+    assert!(fake.clock >= start + 30_000_000);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, fd, F_SETLK, &mut flock(F_UNLCK, 0, 0)),
+        Ok(0)
+    );
+    assert_eq!(fake.locks.iter().count(), 0);
 }

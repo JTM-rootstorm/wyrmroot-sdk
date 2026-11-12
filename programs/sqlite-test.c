@@ -1,14 +1,15 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * SQLite's test on Wyrmroot: the library through its C API, and the C
- * library under it (files on /, seeks, sync, truncate, unlink, mkdir as the
- * lock, the clock, and malloc). Any failed check prints what failed and exits
+ * library under it (files on /, seeks, sync, truncate, unlink, POSIX record
+ * locks, the clock, and malloc). Any failed check prints what failed and exits
  * with status 1.
  *
- * The SDK builds SQLite with the unix-dotfile VFS as its default: Wyrmroot
- * has no POSIX record locks yet, so a lock is a `<database>.lock` directory.
+ * SQLite uses its default unix VFS, whose locks are fcntl record locks; the
+ * POSIX layer takes them through WRFS 1.1 locks on ext4d.
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,7 +18,6 @@
 #include "sqlite3.h"
 
 static const char *const PATH = "/sqlite-test.db";
-static const char *const LOCK = "/sqlite-test.db.lock";
 static int checks;
 
 static void check(int condition, const char *what)
@@ -40,12 +40,31 @@ static sqlite3 *open_database(void)
 	return db;
 }
 
+/* The lock another open file description of the database sees over the
+ * whole file: F_UNLCK, F_RDLCK or F_WRLCK. An open file description lock
+ * belongs to the description, so it conflicts with this process's own fcntl
+ * locks; closing the probe's descriptor would drop them, so it stays open. */
+static int probe = -1;
+
+static int lock_seen(void)
+{
+	struct flock lock = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
+	if (probe < 0)
+		probe = open(PATH, O_RDONLY);
+	if (probe < 0 || fcntl(probe, F_OFD_GETLK, &lock) != 0) {
+		fprintf(stderr, "sqlite-test: probe: %s\n", strerror(errno));
+		exit(1);
+	}
+	return lock.l_type;
+}
+
 /* Runs SQL that must succeed. */
 static void exec(sqlite3 *db, const char *sql)
 {
 	char *error = 0;
 	if (sqlite3_exec(db, sql, 0, 0, &error) != SQLITE_OK) {
-		fprintf(stderr, "sqlite-test: %s: %s\n", sql, error ? error : "?");
+		fprintf(stderr, "sqlite-test: %s: %s (extended code %d, errno %d)\n", sql,
+			error ? error : "?", sqlite3_extended_errcode(db), sqlite3_system_errno(db));
 		exit(1);
 	}
 }
@@ -148,13 +167,22 @@ int main(void)
 
 	/* A second connection is refused the write lock while the first holds
 	 * it, and gets it once the first commits. */
+	/* The write lock as another description sees it. The probe closes
+	 * before the journal and a second connection open: a job has 10
+	 * Channel endpoints (W9). */
+	check(lock_seen() == F_UNLCK, "no lock between transactions");
 	exec(db, "BEGIN IMMEDIATE");
-	check(access(LOCK, F_OK) == 0, "lock directory while locked");
+	check(lock_seen() != F_UNLCK, "a lock while writing");
+	exec(db, "COMMIT");
+	check(lock_seen() == F_UNLCK, "lock released");
+	close(probe);
+	probe = -1;
+
+	exec(db, "BEGIN IMMEDIATE");
 	sqlite3 *other = open_database();
 	check(sqlite3_exec(other, "BEGIN IMMEDIATE", 0, 0, 0) == SQLITE_BUSY, "second writer is busy");
 	exec(db, "INSERT INTO kind VALUES (7, 'seven')");
 	exec(db, "COMMIT");
-	check(access(LOCK, F_OK) != 0 && errno == ENOENT, "lock released");
 	exec(other, "BEGIN IMMEDIATE");
 	check(integer(other, "SELECT label = 'seven' FROM kind WHERE id = 7"), "second writer sees commit");
 	exec(other, "DELETE FROM blob; COMMIT");

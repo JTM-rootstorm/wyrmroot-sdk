@@ -33,6 +33,9 @@ wyrmroot-startup-proto = { path = "../../wyrmroot/crates/wyrmroot-startup-proto"
 wyrmroot-stream-proto = { path = "../../wyrmroot/crates/wyrmroot-stream-proto" }
 wyrmroot-fs-proto = { path = "../../wyrmroot/crates/wyrmroot-fs-proto" }
 
+[dev-dependencies]
+wyrmroot-fs-lock = { path = "../../wyrmroot/crates/wyrmroot-fs-lock" }
+
 [profile.dev]
 panic = "abort"
 

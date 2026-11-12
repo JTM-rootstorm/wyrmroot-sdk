@@ -88,6 +88,11 @@ impl<T, const FILES: usize> FdTable<T, FILES> {
     }
 
     /// The description `fd` names.
+    /// Every open description, once each.
+    pub fn descriptions(&self) -> impl Iterator<Item = &T> {
+        self.files.iter().flatten().map(|slot| &slot.file)
+    }
+
     pub fn get(&mut self, fd: i32) -> Result<&mut T> {
         let index = self.index(fd)?;
         match &mut self.files[index] {
