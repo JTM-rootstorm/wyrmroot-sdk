@@ -11,7 +11,7 @@ which records every input revision and output hash. Inputs are pinned in
 sdk.toml. Nothing is installed outside this directory, and no guest program
 is ever run on the host: programs are only inspected.
 
---fetch downloads the pinned musl, zlib and Lua releases into
+--fetch downloads the pinned musl, zlib, Lua and SQLite releases into
 .cache/sources if they are missing. Every archive is checked against its
 pinned hash before use.
 """
@@ -55,7 +55,7 @@ ALLOWED_PROGRAM_HEADERS = {"PHDR", "LOAD", "GNU_STACK", "TLS"}
 FORBIDDEN_INSTRUCTIONS = ("syscall", "sysenter", "int $0x80")
 
 # Upstream sources the SDK builds, by sdk.toml section.
-SOURCES = ("musl", "zlib", "lua")
+SOURCES = ("musl", "zlib", "lua", "sqlite")
 # zlib's library sources (its Makefile's OBJZ and OBJG).
 ZLIB_SOURCES = (
     "adler32.c", "crc32.c", "deflate.c", "infback.c", "inffast.c", "inflate.c",
@@ -64,6 +64,14 @@ ZLIB_SOURCES = (
 )
 # Lua's interpreter: every source but the compiler's.
 LUA_EXCLUDED = {"luac.c"}
+# SQLite for Wyrmroot: one thread, no loadable extensions, no file mmap (the
+# layer has none), and dot-file locks, since there are no POSIX record locks
+# yet (TOOLCHAIN_POSIX_LAYER_DESIGN.md §8, W10). usleep is in musl.
+SQLITE_FLAGS = (
+    "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_MAX_MMAP_SIZE=0",
+    '-DSQLITE_DEFAULT_UNIX_VFS="unix-dotfile"', "-DSQLITE_ENABLE_MATH_FUNCTIONS",
+    "-DHAVE_USLEEP=1",
+)
 
 
 def fail(message):
@@ -176,7 +184,8 @@ class Inputs:
         """Unpacks a pinned archive into `build`; its top directory."""
         with tarfile.open(self.archives[name]) as archive:
             archive.extractall(build, filter="data")
-        return build / f"{name}-{self.pins[name]['version']}"
+        pin = self.pins[name]
+        return build / pin.get("directory", f"{name}-{pin['version']}")
 
 
 def fresh(path):
@@ -408,20 +417,27 @@ def build_zlib(inputs, wrapper, build, sysroot):
 
 
 def build_programs(inputs, wrapper, build, zlib):
-    """The test programs dev-boot runs: our hello, zlib's own example, and
-    the Lua interpreter with its test script."""
+    """The test programs dev-boot runs: our hello, zlib's own example, the
+    Lua interpreter with its test script, and the sqlite3 shell with our
+    SQLite test."""
     step("test programs")
     programs = OUT / "programs"
     programs.mkdir()
     lua = inputs.unpack("lua", build) / "src"
     ours = ["-O2", "-Wall", "-Wextra", "-Werror"]
     upstream = ["-O2", "-Wall"]
+    sqlite = inputs.unpack("sqlite", build)
+    sqlite_object = build / "sqlite3.o"
+    run([wrapper, "-c", "-o", sqlite_object, *upstream, *SQLITE_FLAGS, sqlite / "sqlite3.c"])
     builds = {
         "hello": ours + [SDK / "programs" / "hello.c"],
         "zlib-example": upstream + [zlib / "test" / "example.c", "-lz"],
         "lua": upstream + ["-std=gnu99", "-DLUA_USE_POSIX"]
                + sorted(path for path in lua.glob("*.c") if path.name not in LUA_EXCLUDED)
                + ["-lm"],
+        "sqlite3": upstream + list(SQLITE_FLAGS) + [sqlite / "shell.c", sqlite_object, "-lm"],
+        "sqlite-test": ours + ["-I", sqlite, SDK / "programs" / "sqlite-test.c", sqlite_object,
+                               "-lm"],
     }
     results = {}
     for name, arguments in builds.items():
@@ -460,6 +476,8 @@ def write_manifest(inputs, sysroot, header, builtins, programs):
         f'zlib_sha256 = "{inputs.pins["zlib"]["sha256"]}"',
         f'lua = "{inputs.pins["lua"]["version"]}"',
         f'lua_sha256 = "{inputs.pins["lua"]["sha256"]}"',
+        f'sqlite = "{inputs.pins["sqlite"]["version"]}"',
+        f'sqlite_sha256 = "{inputs.pins["sqlite"]["sha256"]}"',
         "",
         "[outputs]",
     ]

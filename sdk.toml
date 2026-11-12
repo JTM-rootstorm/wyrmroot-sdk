@@ -47,3 +47,15 @@ version = "5.5.1"
 url = "https://www.lua.org/ftp/lua-5.5.1.tar.gz"
 sha256 = "1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce"
 license = "MIT"
+
+[sqlite]
+# The library, linked into the sqlite3 shell and our test program only.
+# SQLite releases are not signed: the SHA3-256 sqlite.org publishes for the
+# release was checked on 2026-11-12, and the SHA-256 below is the pin from
+# then on.
+version = "3.54.1"
+url = "https://sqlite.org/2026/sqlite-autoconf-3540100.tar.gz"
+sha3_256 = "b6ced585c750916b1052667239a12c25a7ff34e7f06e1e6e01ecb0427657d9c4"
+sha256 = "926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e"
+directory = "sqlite-autoconf-3540100"
+license = "blessing"
