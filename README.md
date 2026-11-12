@@ -14,4 +14,8 @@ Native first-party Wyrmroot services do not use this SDK; they stay libc-free.
 
 ## Licensing
 
-First-party build tooling in this repository is `GPL-3.0-or-later` (`LICENSES/GPL-3.0-or-later.txt`). Third-party sources such as musl are pinned by revision and keep their upstream licenses. The license of the first-party runtime code that is linked into applications, chiefly the POSIX layer, is not yet chosen.
+- **Runtime code linked into programs** (the POSIX layer, startup objects, generated service bindings): `GPL-3.0-or-later WITH Classpath-exception-2.0` (`LICENSES/GPL-3.0-or-later.txt`, `LICENSES/Classpath-exception-2.0.txt`). A program may link it and be distributed under the program's own terms; changes to the runtime itself stay under the GPL.
+- **Build tooling:** `GPL-3.0-or-later`.
+- **Third-party sources** such as musl are pinned by revision and keep their upstream licenses.
+
+The project-wide rule is in the root `LICENSING_POLICY.md`.
