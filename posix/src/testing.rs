@@ -6,7 +6,7 @@
 use crate::native::{Native, Received};
 use deepwyrm_syscall::*;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use wyrmroot_fs_lock::{LockError, LockTable};
+use wyrmroot_fs_lock::{LockServer, Outcome};
 use wyrmroot_fs_proto::node::{self, Attr, Body, EntryWriter, Kind};
 use wyrmroot_fs_proto::{
     OPEN_CREATE, OPEN_DIRECTORY, OPEN_EXCLUSIVE, OPEN_FILE, OPEN_TRUNCATE, OPEN_WRITE, Status,
@@ -58,10 +58,10 @@ pub struct Fake {
     pub wrong_open_transaction: bool,
     /// The filesystem's locks, owned by node Channels (and by whatever
     /// owner a test adds to stand for another process).
-    pub locks: LockTable<64>,
-    /// At this clock reading, a sleep releases this lock owner's locks, as
-    /// another process unlocking would.
-    pub release_at: Option<(u64, u64)>,
+    pub locks: LockServer<64, 16>,
+    /// When a LOCK starts to wait, this lock owner lets go of its locks, as
+    /// another process would while the caller waits.
+    pub release_when_waited: Option<u64>,
     /// The filesystem has no node slot for an OPEN of a node again.
     pub refuse_reopen: bool,
 }
@@ -424,14 +424,20 @@ impl Fake {
                     },
                 );
             }
-            Body::Lock(lock) => {
+            Body::Lock { lock, flags, group } => {
                 let file = self.attr(&path, false).unwrap().id;
-                let result = match self.locks.set(file, client, lock) {
-                    Ok(()) => Status::Ok,
-                    Err(LockError::Conflict) => Status::Busy,
-                    Err(LockError::NoRoom) => Status::NoResources,
-                };
-                self.reply(client, id, status(result));
+                let outcome = self.locks.request(client, file, lock, flags, group, id);
+                if outcome == Outcome::Waiting {
+                    // Nothing answers a wait unless the holder lets go.
+                    if let Some(holder) = self.release_when_waited.take() {
+                        self.locks.release(holder);
+                    }
+                    while let Some((owner, token, outcome)) = self.locks.take_granted() {
+                        self.reply(owner, token, lock_reply(outcome));
+                    }
+                    return;
+                }
+                self.reply(client, id, lock_reply(outcome));
             }
             Body::TestLock(lock) => {
                 let file = self.attr(&path, false).unwrap().id;
@@ -443,6 +449,24 @@ impl Fake {
             }
             _ => self.reply(client, id, status(Status::NotSupported)),
         }
+    }
+}
+
+fn lock_reply(outcome: Outcome) -> Body<'static> {
+    match outcome {
+        Outcome::Granted(group) => Body::Status {
+            status: Status::Ok,
+            value: group,
+        },
+        outcome => Body::Status {
+            status: match outcome {
+                Outcome::Busy => Status::Busy,
+                Outcome::Deadlock => Status::Deadlock,
+                Outcome::NoRoom => Status::NoResources,
+                _ => Status::Invalid,
+            },
+            value: 0,
+        },
     }
 }
 
@@ -528,12 +552,6 @@ impl Native for Fake {
             "the fake would wait forever"
         );
         self.clock = self.clock.max(deadline.0);
-        if let Some((at, owner)) = self.release_at
-            && self.clock >= at
-        {
-            self.locks.release(owner);
-            self.release_at = None;
-        }
         Err(DW_STATUS_TIMED_OUT)
     }
 

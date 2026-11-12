@@ -42,6 +42,7 @@ pub const EROFS: Errno = Errno(30);
 pub const EPIPE: Errno = Errno(32);
 pub const ERANGE: Errno = Errno(34);
 pub const ENAMETOOLONG: Errno = Errno(36);
+pub const EDEADLK: Errno = Errno(35);
 pub const ENOLCK: Errno = Errno(37);
 pub const ENOSYS: Errno = Errno(38);
 pub const ENOTEMPTY: Errno = Errno(39);
@@ -89,6 +90,7 @@ pub const fn from_fs(status: Status) -> Errno {
         Status::NotEmpty => ENOTEMPTY,
         Status::NoResources => ENFILE,
         Status::Busy => EBUSY,
+        Status::Deadlock => EDEADLK,
     }
 }
 

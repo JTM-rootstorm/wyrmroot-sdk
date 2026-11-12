@@ -28,7 +28,7 @@ const NULL_PATH: &[u8] = b"/dev/null";
 
 mod lock;
 use lock::LockOwner;
-pub use lock::MAX_LOCKED_FILES;
+pub use lock::{MAX_LOCK_GROUPS, MAX_LOCKED_FILES};
 
 pub struct NodeFile {
     pub channel: DwHandle,
@@ -89,6 +89,8 @@ pub struct Process {
     /// One lock Channel per file this process holds POSIX record locks on
     /// (W10).
     lock_owners: [Option<LockOwner>; MAX_LOCKED_FILES],
+    /// The lock group each filesystem gave this process: (`st_dev`, group).
+    lock_groups: [Option<(u64, u64)>; MAX_LOCK_GROUPS],
 }
 
 impl Default for Process {
@@ -110,6 +112,7 @@ impl Process {
             sleeper: None,
             arenas: Arenas::new(),
             lock_owners: [None; MAX_LOCKED_FILES],
+            lock_groups: [None; MAX_LOCK_GROUPS],
         }
     }
 

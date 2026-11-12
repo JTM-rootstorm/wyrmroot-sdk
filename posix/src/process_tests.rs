@@ -7,6 +7,7 @@ use crate::process::Process;
 use crate::testing::{FILESYSTEM, Fake, FsNode, NAMESPACE, ROOT};
 use crate::types::*;
 use deepwyrm_syscall::*;
+use wyrmroot_fs_lock::Outcome;
 use wyrmroot_fs_proto::node::{Lock, LockMode};
 
 fn setup() -> (Fake, Box<Process>) {
@@ -565,7 +566,10 @@ fn flock(l_type: i16, l_start: i64, l_len: i64) -> Flock {
 
 fn other_locks(fake: &mut Fake, path: &str, lock: Lock) -> bool {
     let file = fake.file_id(path);
-    fake.locks.set(file, OTHER, lock).is_ok()
+    matches!(
+        fake.locks.request(OTHER, file, lock, 0, 0, 0),
+        Outcome::Granted(_)
+    )
 }
 
 fn whole(mode: LockMode) -> Lock {
@@ -648,7 +652,7 @@ fn classic_locks_belong_to_the_process_and_go_with_any_close() {
         closed + 3,
         "the descriptor and the lock Channel"
     );
-    assert_eq!(fake.locks.iter().count(), 0);
+    assert_eq!(fake.locks.table().iter().count(), 0);
 }
 
 #[test]
@@ -694,6 +698,7 @@ fn lock_requests_are_checked_against_the_descriptor() {
     );
     let held: Vec<_> = fake
         .locks
+        .table()
         .iter()
         .map(|held| (held.start, held.end))
         .collect();
@@ -753,19 +758,75 @@ fn a_waiting_lock_is_taken_once_the_holder_lets_go() {
     fake.put("/db", FsNode::File(Vec::new()));
     let fd = open(&mut fake, &mut process, "/db", O_RDWR).unwrap();
     assert!(other_locks(&mut fake, "/db", whole(LockMode::Exclusive)));
-    fake.release_at = Some((fake.clock + 30_000_000, OTHER));
-    let start = fake.clock;
     let mut write = flock(F_WRLCK, 0, 0);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, fd, F_SETLK, &mut write),
+        Err(EAGAIN)
+    );
+    // The server answers the wait when the holder lets go; nothing polls.
+    fake.release_when_waited = Some(OTHER);
+    let clock = fake.clock;
     assert_eq!(
         process.fcntl_lock(&mut fake, fd, F_SETLKW, &mut write),
         Ok(0)
     );
-    assert!(fake.clock >= start + 30_000_000);
+    assert_eq!(fake.clock, clock);
     assert_eq!(
         process.fcntl_lock(&mut fake, fd, F_SETLK, &mut flock(F_UNLCK, 0, 0)),
         Ok(0)
     );
-    assert_eq!(fake.locks.iter().count(), 0);
+    assert_eq!(fake.locks.table().iter().count(), 0);
+}
+
+#[test]
+fn waits_that_never_end_are_edeadlk() {
+    let (mut fake, mut process) = setup();
+    fake.put("/a", FsNode::File(Vec::new()));
+    fake.put("/b", FsNode::File(Vec::new()));
+    let a = open(&mut fake, &mut process, "/a", O_RDWR).unwrap();
+    let b = open(&mut fake, &mut process, "/b", O_RDWR).unwrap();
+    // The process's own description lock blocks its classic lock: Linux
+    // would wait for ever.
+    let mut write = flock(F_WRLCK, 0, 0);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, a, F_OFD_SETLK, &mut write),
+        Ok(0)
+    );
+    assert_eq!(
+        process.fcntl_lock(&mut fake, a, F_SETLKW, &mut write),
+        Err(EDEADLK)
+    );
+    // Another process holds /b and waits for /a, which this one holds by
+    // its description lock: waiting for /b would close the cycle.
+    let file_b = fake.file_id("/b");
+    let file_a = fake.file_id("/a");
+    let Outcome::Granted(other) =
+        fake.locks
+            .request(OTHER, file_b, whole(LockMode::Exclusive), 0, 0, 0)
+    else {
+        panic!("the other process locks /b");
+    };
+    assert_eq!(
+        fake.locks.request(
+            OTHER + 1,
+            file_a,
+            whole(LockMode::Exclusive),
+            wyrmroot_fs_proto::node::LOCK_WAIT,
+            other,
+            7
+        ),
+        Outcome::Waiting
+    );
+    assert_eq!(
+        process.fcntl_lock(&mut fake, b, F_SETLKW, &mut write),
+        Err(EDEADLK)
+    );
+    // One group for the process on the filesystem.
+    let mut plain = flock(F_RDLCK, 0, 0);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, a, F_SETLK, &mut plain),
+        Err(EAGAIN)
+    );
 }
 
 #[test]
@@ -780,5 +841,19 @@ fn a_lock_without_room_for_its_channel_is_enolck() {
         process.fcntl_lock(&mut fake, fd, F_SETLK, &mut write),
         Err(ENOLCK)
     );
-    assert_eq!(fake.locks.iter().count(), 0);
+    assert_eq!(fake.locks.table().iter().count(), 0);
+}
+
+#[test]
+fn a_group_that_went_with_its_last_channel_is_replaced() {
+    let (mut fake, mut process) = setup();
+    fake.put("/a", FsNode::File(Vec::new()));
+    fake.put("/b", FsNode::File(Vec::new()));
+    let a = open(&mut fake, &mut process, "/a", O_RDWR).unwrap();
+    let mut write = flock(F_WRLCK, 0, 0);
+    assert_eq!(process.fcntl_lock(&mut fake, a, F_SETLK, &mut write), Ok(0));
+    // The lock Channel, the group's only member, goes with the file.
+    assert_eq!(process.close(&mut fake, a), Ok(0));
+    let b = open(&mut fake, &mut process, "/b", O_RDWR).unwrap();
+    assert_eq!(process.fcntl_lock(&mut fake, b, F_SETLK, &mut write), Ok(0));
 }

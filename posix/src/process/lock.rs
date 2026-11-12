@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
-//! POSIX record locks over WRFS 1.1 locks (root
+//! POSIX record locks over WRFS 1.2 locks (root
 //! `TOOLCHAIN_POSIX_LAYER_DESIGN.md` W10).
 //!
 //! A WRFS lock belongs to the Channel it was taken on, which is what Linux
@@ -14,9 +14,15 @@
 //! when no description of the file is left. A job that ends closes every
 //! Channel, which releases every lock it held.
 //!
-//! The server never waits, so `F_SETLKW` retries with a growing sleep. The
-//! holder of a conflicting lock is not known: `F_GETLK` reports `l_pid` -1,
-//! as Linux does for description locks.
+//! Every lock Channel of the process on one filesystem, its description
+//! locks' Channels included, is in the lock group that filesystem gave the
+//! process with its first lock. `F_SETLKW` waits in the server, which
+//! answers `EDEADLK` instead when the wait would never end: two processes
+//! waiting for each other, across any files of that filesystem, or a
+//! process waiting for its own description lock. Wyrmroot has no signals,
+//! so a wait ends only with the lock, `EDEADLK`, or the job. The holder of a
+//! conflicting lock is not known: `F_GETLK` reports `l_pid` -1, as Linux
+//! does for description locks.
 
 use super::{FileKind, Process};
 use crate::errno::*;
@@ -24,15 +30,16 @@ use crate::native::Native;
 use crate::node;
 use crate::types::*;
 use deepwyrm_syscall::DwHandle;
-use wyrmroot_fs_proto::node::{Body, Lock, LockMode};
+use wyrmroot_fs_proto::node::{Body, LOCK_WAIT, Lock, LockMode};
 use wyrmroot_fs_proto::{OPEN_READ, OPEN_WRITE, Status};
 
 /// The most files one process holds classic locks on at once.
 pub const MAX_LOCKED_FILES: usize = 16;
 
-/// The first and longest `F_SETLKW` retry sleeps.
-const FIRST_RETRY_NS: u64 = 1_000_000;
-const LONGEST_RETRY_NS: u64 = 50_000_000;
+/// The most filesystems the process remembers a lock group for. Past them,
+/// each lock Channel is a group of its own, and a deadlock through it is not
+/// found.
+pub const MAX_LOCK_GROUPS: usize = 8;
 
 /// A file as the process sees it: (`st_dev`, `st_ino`).
 type Identity = (u64, u64);
@@ -46,6 +53,8 @@ pub(super) struct LockOwner {
 /// What a lock command asks, once its descriptor is resolved.
 struct Request {
     channel: DwHandle,
+    /// The descriptor's filesystem identity, for its lock group.
+    filesystem: u64,
     file: Option<Identity>,
     lock: Lock,
     /// WRFS flags to open the file again with, for a new lock Channel.
@@ -81,13 +90,25 @@ impl Process {
         }
         let waiting = matches!(command, F_SETLKW | F_OFD_SETLKW);
         if description {
-            return self.set_lock(native, request.channel, request.lock, waiting);
+            return self.set_lock(
+                native,
+                request.channel,
+                request.filesystem,
+                request.lock,
+                waiting,
+            );
         }
         let Some(file) = request.file else {
             return Err(ENOLCK);
         };
         if let Some(owner) = owner {
-            return self.set_lock(native, owner.channel, request.lock, waiting);
+            return self.set_lock(
+                native,
+                owner.channel,
+                request.filesystem,
+                request.lock,
+                waiting,
+            );
         }
         if request.lock.mode == LockMode::Unlock {
             return Ok(0);
@@ -100,7 +121,7 @@ impl Process {
         // No Channel for the lock is no lock, whatever ran out.
         let channel = node::reopen(native, request.channel, &mut self.scratch, request.reopen)
             .map_err(|_| ENOLCK)?;
-        match self.set_lock(native, channel, request.lock, waiting) {
+        match self.set_lock(native, channel, request.filesystem, request.lock, waiting) {
             Ok(done) => {
                 self.lock_owners[slot] = Some(LockOwner { file, channel });
                 Ok(done)
@@ -169,6 +190,7 @@ impl Process {
         let reopen = if readable { OPEN_READ } else { 0 } | if writable { OPEN_WRITE } else { 0 };
         Ok(Request {
             channel: node.channel,
+            filesystem: node.filesystem,
             file: (node.filesystem != 0 && node.id != 0).then_some((node.filesystem, node.id)),
             lock,
             reopen,
@@ -183,25 +205,58 @@ impl Process {
             .copied()
     }
 
+    /// LOCK on `channel`, in the process's lock group on `filesystem`.
     fn set_lock<N: Native>(
         &mut self,
         native: &mut N,
         channel: DwHandle,
+        filesystem: u64,
         lock: Lock,
         waiting: bool,
     ) -> Result<usize> {
-        let mut retry = FIRST_RETRY_NS;
-        loop {
-            match node::status(native, channel, &mut self.scratch, Body::Lock(lock)) {
-                Ok(_) => return Ok(0),
-                Err(EBUSY) if waiting => {
-                    let now = native.now().map_err(from_status)?;
-                    self.sleep_until(native, now.saturating_add(retry))?;
-                    retry = (retry * 2).min(LONGEST_RETRY_NS);
+        let flags = if waiting { LOCK_WAIT } else { 0 };
+        let known = self
+            .lock_groups
+            .iter()
+            .flatten()
+            .find(|(owner, _)| *owner == filesystem)
+            .map(|&(_, group)| group);
+        let mut send = |process: &mut Self, group| {
+            let body = Body::Lock { lock, flags, group };
+            node::status(native, channel, &mut process.scratch, body)
+        };
+        let result = match send(self, known.unwrap_or(0)) {
+            // The group went with the process's last lock Channel on the
+            // filesystem; a new one is asked for.
+            Err(EINVAL) if known.is_some() => {
+                self.forget_lock_group(filesystem);
+                send(self, 0)
+            }
+            result => result,
+        };
+        match result {
+            Ok(group) => {
+                if known.is_none() {
+                    self.remember_lock_group(filesystem, group);
                 }
-                Err(EBUSY) => return Err(EAGAIN),
-                Err(ENFILE | ENOTSUP) => return Err(ENOLCK),
-                Err(error) => return Err(error),
+                Ok(0)
+            }
+            Err(EBUSY) => Err(EAGAIN),
+            Err(ENFILE | ENOTSUP) => Err(ENOLCK),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn remember_lock_group(&mut self, filesystem: u64, group: u64) {
+        if let Some(slot) = self.lock_groups.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some((filesystem, group));
+        }
+    }
+
+    fn forget_lock_group(&mut self, filesystem: u64) {
+        for slot in &mut self.lock_groups {
+            if slot.is_some_and(|(owner, _)| owner == filesystem) {
+                *slot = None;
             }
         }
     }
@@ -279,7 +334,12 @@ impl Process {
                 length: 0,
                 mode: LockMode::Unlock,
             };
-            if node::status(native, channel, &mut self.scratch, Body::Lock(everything)).is_ok() {
+            let body = Body::Lock {
+                lock: everything,
+                flags: 0,
+                group: 0,
+            };
+            if node::status(native, channel, &mut self.scratch, body).is_ok() {
                 return;
             }
         }
