@@ -11,6 +11,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod arena;
 pub mod errno;
 pub mod exports;
 pub mod fdtable;

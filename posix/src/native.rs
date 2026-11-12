@@ -54,6 +54,8 @@ pub trait Native {
         protections: DwMemoryProtection,
     ) -> Result<(), DwStatus>;
     fn set_fs_base(&mut self, base: u64) -> Result<(), DwStatus>;
+    /// Zeroes `length` bytes of this process's mapped, writable memory.
+    fn zero(&mut self, address: u64, length: u64);
 }
 
 #[cfg(target_os = "wyrmroot")]
@@ -202,5 +204,11 @@ impl Native for Kernel {
 
     fn set_fs_base(&mut self, base: u64) -> Result<(), DwStatus> {
         check(thread_set_fs_base(base))
+    }
+
+    fn zero(&mut self, address: u64, length: u64) {
+        // SAFETY: only arena pages reach here, and arenas are mapped
+        // read-write and never unmapped.
+        unsafe { core::ptr::write_bytes(address as *mut u8, 0, length as usize) }
     }
 }

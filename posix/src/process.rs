@@ -3,6 +3,7 @@
 //! paths, memory and time. Every operation takes the native interface as
 //! an argument, so host tests run the same code against a fake.
 
+use crate::arena::{ARENA_PAGES, Arena, Arenas, MAX_ARENA_PAGES, Place};
 use crate::errno::*;
 use crate::fdtable::FdTable;
 use crate::native::Native;
@@ -78,6 +79,7 @@ pub struct Process {
     /// A private Channel nobody writes to; sleeps wait on it with a
     /// deadline.
     sleeper: Option<(DwHandle, DwHandle)>,
+    arenas: Arenas,
 }
 
 impl Default for Process {
@@ -97,6 +99,7 @@ impl Process {
             cwd: [0; MAX_PATH_BYTES],
             cwd_length: 0,
             sleeper: None,
+            arenas: Arenas::new(),
         }
     }
 
@@ -787,6 +790,17 @@ impl Process {
         if fixed && (address == 0 || !address.is_multiple_of(PAGE_SIZE)) {
             return Err(EINVAL);
         }
+        let read_write =
+            DwMemoryProtection(DW_MEMORY_PROTECTION_READ.0 | DW_MEMORY_PROTECTION_WRITE.0);
+        // Ordinary requests come from the arenas. Their pages are read-write
+        // whatever `prot` asked short of execute, which POSIX allows.
+        if !fixed && protections.0 & DW_MEMORY_PROTECTION_EXECUTE.0 == 0 {
+            return self.arena_allocate(native, root, length / PAGE_SIZE, read_write);
+        }
+        if fixed && self.arenas.place(address, length) != Place::Outside {
+            // An arena is never split or replaced.
+            return Err(if replace { EINVAL } else { EEXIST });
+        }
         if replace {
             // FIXED never replaces natively. Not atomic, which is fine
             // without threads (design §5).
@@ -820,8 +834,58 @@ impl Process {
             return Err(EINVAL);
         }
         let length = round_pages(length).ok_or(EINVAL)?;
-        native.unmap(root, address, length).map_err(|_| EINVAL)?;
-        Ok(0)
+        match self.arenas.place(address, length) {
+            Place::Inside(index) => {
+                self.arenas.release(index, address, length);
+                Ok(0)
+            }
+            Place::Straddling => Err(EINVAL),
+            Place::Outside => {
+                native.unmap(root, address, length).map_err(|_| EINVAL)?;
+                Ok(0)
+            }
+        }
+    }
+
+    /// `pages` zeroed pages from the arenas, mapping a new arena when none
+    /// has room: 4 MiB, or the request if larger, or only the request once
+    /// the job's page budget is nearly spent.
+    fn arena_allocate<N: Native>(
+        &mut self,
+        native: &mut N,
+        root: DwHandle,
+        pages: u64,
+        read_write: DwMemoryProtection,
+    ) -> Result<usize> {
+        if pages > MAX_ARENA_PAGES {
+            return Err(ENOMEM);
+        }
+        if let Some((address, dirty)) = self.arenas.allocate(pages) {
+            if dirty {
+                native.zero(address, pages * PAGE_SIZE);
+            }
+            return Ok(address as usize);
+        }
+        if self.arenas.is_full() {
+            return Err(ENOMEM);
+        }
+        let mut size = pages.max(ARENA_PAGES);
+        let base = loop {
+            match native.map_anonymous(root, 0, size * PAGE_SIZE, read_write, false) {
+                Ok(base) => break base,
+                Err(DW_STATUS_NO_RESOURCES | DW_STATUS_NO_MEMORY) if size > pages => size = pages,
+                Err(DW_STATUS_ACCESS_DENIED) => return Err(EACCES),
+                Err(_) => return Err(ENOMEM),
+            }
+        };
+        let mut arena = Arena::new(base, size);
+        let Some((address, _)) = arena.allocate(pages) else {
+            return Err(ENOMEM);
+        };
+        if !self.arenas.add(arena) {
+            return Err(ENOMEM);
+        }
+        Ok(address as usize)
     }
 
     pub fn mprotect<N: Native>(

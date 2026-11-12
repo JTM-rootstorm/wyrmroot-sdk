@@ -269,6 +269,11 @@ def build_musl(inputs, tree, sysroot):
     with open(tree / "config.mak", "a") as config:
         # configure maps the triple to x86_64; the port is its own arch.
         config.write("ARCH = wyrmroot_x86_64\n")
+        # mallocng reserves its metadata with PROT_NONE and unprotects it page
+        # by page; Wyrmroot has no no-access protection until Deepwyrm D3, and
+        # the layer refuses PROT_NONE rather than hand out unguarded pages.
+        # oldmalloc maps only read-write memory. Back to mallocng after D3.
+        config.write("MALLOC_DIR = oldmalloc\n")
     run(["make", f"-j{os.cpu_count() or 4}"], cwd=tree, environment=environment, capture=True)
     run(["make", "install", f"DESTDIR={sysroot}"], cwd=tree, environment=environment, capture=True)
     for unused in ("rcrt1.o", "Scrt1.o"):

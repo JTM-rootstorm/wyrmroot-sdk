@@ -283,28 +283,96 @@ fn status_flags_can_be_read_and_changed() {
     assert_eq!(process.ioctl(77, TIOCGWINSZ), Err(EBADF));
 }
 
+const ARENA: u64 = crate::arena::ARENA_PAGES * 4096;
+const RW: DwMemoryProtection = DwMemoryProtection(3);
+
 #[test]
-fn anonymous_memory_maps_protects_and_unmaps() {
+fn anonymous_memory_comes_from_arenas_and_is_zeroed_on_reuse() {
     let (mut fake, mut process) = setup();
-    let address = process
-        .mmap(
-            &mut fake,
-            0,
-            5000,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS,
-        )
+    let anonymous = MAP_PRIVATE | MAP_ANONYMOUS;
+    let first = process
+        .mmap(&mut fake, 0, 5000, PROT_READ | PROT_WRITE, anonymous)
         .unwrap() as u64;
-    assert_eq!(fake.mappings, [(address, 8192, DwMemoryProtection(3))]);
-    assert_eq!(process.mprotect(&mut fake, address, 8192, PROT_READ), Ok(0));
+    // One 4 MiB read-write arena, and the request at its start.
+    assert_eq!(fake.mappings, [(first, ARENA, RW)]);
+    let second = process
+        .mmap(&mut fake, 0, 4096, PROT_READ, anonymous)
+        .unwrap() as u64;
+    assert_eq!(second, first + 8192);
+    assert_eq!(fake.mappings.len(), 1);
+    assert!(fake.zeroed.is_empty());
+    // Unmapping returns the pages; reusing them zeroes them first.
+    assert_eq!(process.munmap(&mut fake, first, 8192), Ok(0));
+    assert_eq!(fake.mappings.len(), 1);
+    let again = process
+        .mmap(&mut fake, 0, 8192, PROT_READ | PROT_WRITE, anonymous)
+        .unwrap() as u64;
+    assert_eq!(again, first);
+    assert_eq!(fake.zeroed, [(first, 8192)]);
+    assert_eq!(process.munmap(&mut fake, first + 1, 8192), Err(EINVAL));
+    // A range that would split an arena is refused.
+    assert_eq!(
+        process.munmap(&mut fake, first + ARENA - 4096, 8192),
+        Err(EINVAL)
+    );
+}
+
+#[test]
+fn the_arenas_stop_at_the_job_budget() {
+    let (mut fake, mut process) = setup();
+    let anonymous = MAP_PRIVATE | MAP_ANONYMOUS;
+    // Larger than an arena: its own arena of exactly that size.
+    let big = 6 * 1024 * 1024;
+    let address = process
+        .mmap(&mut fake, 0, big, PROT_READ | PROT_WRITE, anonymous)
+        .unwrap() as u64;
+    assert_eq!(fake.mappings, [(address, big, RW)]);
+    // More than the whole 16 MiB budget at once is refused.
+    let too_big = crate::arena::MAX_ARENA_PAGES * 4096 + 4096;
+    assert_eq!(
+        process.mmap(&mut fake, 0, too_big, PROT_READ, anonymous),
+        Err(ENOMEM)
+    );
+    for _ in 0..3 {
+        process
+            .mmap(&mut fake, 0, ARENA, PROT_READ, anonymous)
+            .unwrap();
+    }
+    assert_eq!(fake.mappings.len(), 4);
+    // Four arenas are the job's MemoryObject budget.
+    assert_eq!(
+        process.mmap(&mut fake, 0, 4096, PROT_READ, anonymous),
+        Err(ENOMEM)
+    );
+}
+
+#[test]
+fn a_nearly_spent_budget_maps_only_the_request() {
+    let (mut fake, mut process) = setup();
+    fake.map_limit = Some(64 * 1024);
+    let anonymous = MAP_PRIVATE | MAP_ANONYMOUS;
+    let address = process
+        .mmap(&mut fake, 0, 4096, PROT_READ, anonymous)
+        .unwrap() as u64;
+    assert_eq!(fake.mappings, [(address, 4096, RW)]);
+}
+
+#[test]
+fn executable_memory_is_mapped_directly_and_can_be_protected() {
+    let (mut fake, mut process) = setup();
+    let anonymous = MAP_PRIVATE | MAP_ANONYMOUS;
+    let address = process
+        .mmap(&mut fake, 0, 4096, PROT_EXEC, anonymous)
+        .unwrap() as u64;
+    assert_eq!(fake.mappings, [(address, 4096, DwMemoryProtection(5))]);
+    assert_eq!(process.mprotect(&mut fake, address, 4096, PROT_READ), Ok(0));
     assert_eq!(fake.mappings[0].2, DW_MEMORY_PROTECTION_READ);
     assert_eq!(
-        process.mprotect(&mut fake, address, 8192, PROT_NONE_FOR_TEST),
+        process.mprotect(&mut fake, address, 4096, PROT_NONE_FOR_TEST),
         Err(ENOTSUP)
     );
-    assert_eq!(process.munmap(&mut fake, address, 8192), Ok(0));
+    assert_eq!(process.munmap(&mut fake, address, 4096), Ok(0));
     assert!(fake.mappings.is_empty());
-    assert_eq!(process.munmap(&mut fake, address + 1, 8192), Err(EINVAL));
 }
 
 const PROT_NONE_FOR_TEST: i32 = 0;
@@ -338,15 +406,7 @@ fn unsupported_mappings_fail_with_the_right_errno() {
         process.mmap(&mut fake, 0x1001, 4096, PROT_READ, anonymous | MAP_FIXED),
         Err(EINVAL)
     );
-    // Write-only and execute-only gain read, which x86_64 cannot omit.
-    process
-        .mmap(&mut fake, 0, 4096, PROT_WRITE, anonymous)
-        .unwrap();
-    process
-        .mmap(&mut fake, 0, 4096, PROT_EXEC, anonymous)
-        .unwrap();
-    assert_eq!(fake.mappings[0].2, DwMemoryProtection(3));
-    assert_eq!(fake.mappings[1].2, DwMemoryProtection(5));
+    assert!(fake.mappings.is_empty());
 }
 
 #[test]
@@ -374,6 +434,18 @@ fn fixed_mappings_replace_and_noreplace_refuses() {
         Ok(at as usize)
     );
     assert_eq!(fake.mappings, [(at, 4096, DwMemoryProtection(3))]);
+    // A fixed mapping never lands on an arena.
+    let arena = process
+        .mmap(&mut fake, 0, 4096, PROT_READ, anonymous)
+        .unwrap() as u64;
+    assert_eq!(
+        process.mmap(&mut fake, arena, 4096, PROT_READ, noreplace),
+        Err(EEXIST)
+    );
+    assert_eq!(
+        process.mmap(&mut fake, arena, 4096, PROT_READ, anonymous | MAP_FIXED),
+        Err(EINVAL)
+    );
 }
 
 #[test]

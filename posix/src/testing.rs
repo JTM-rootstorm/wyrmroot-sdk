@@ -48,6 +48,9 @@ pub struct Fake {
     next_address: u64,
     pub fs_base: u64,
     pub syncs: usize,
+    pub zeroed: Vec<(u64, u64)>,
+    /// Mappings larger than this many bytes fail with NO_RESOURCES.
+    pub map_limit: Option<u64>,
 }
 
 impl Fake {
@@ -479,6 +482,9 @@ impl Native for Fake {
         fixed: bool,
     ) -> Result<u64, DwStatus> {
         assert_eq!(root, ROOT);
+        if self.map_limit.is_some_and(|limit| length > limit) {
+            return Err(DW_STATUS_NO_RESOURCES);
+        }
         let start = if fixed {
             if self
                 .mappings
@@ -533,5 +539,9 @@ impl Native for Fake {
         }
         self.fs_base = base;
         Ok(())
+    }
+
+    fn zero(&mut self, address: u64, length: u64) {
+        self.zeroed.push((address, length));
     }
 }
