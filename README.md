@@ -16,22 +16,22 @@ Native first-party Wyrmroot services do not use this SDK; they stay libc-free.
 
 - `posix/`: the Wyrmroot POSIX layer, a Rust `no_std` crate built into `libwrposix.a`. It exports one `__wr_*` C function per operation; `wr_posix.h` is generated from it.
 - `musl/`: the musl port, `arch/wyrmroot_x86_64`. Its `syscall_arch.h` sends every musl system call to a dispatcher that calls the POSIX layer; no musl code enters the kernel.
-- `programs/`: test programs built against the SDK.
-- `sdk.toml`: the pinned inputs (musl release, LLVM fork revision and build, Rust fork toolchain).
-- `build.py`: builds everything into `out/`: the sysroot, the `out/bin/wyrmroot-cc` wrapper, the test programs and `out/sdk-manifest.toml`, which records every input revision and output hash.
+- `programs/`: our own test programs. With zlib's `test/example.c` and the Lua interpreter, they are what Wyrmroot's `dev-boot --check --sdk` runs.
+- `sdk.toml`: the pinned inputs (the musl, zlib and Lua releases, the LLVM fork revision and build, the Rust fork toolchain).
+- `build.py`: builds everything into `out/`: the sysroot (with zlib as `libz.a`), the `out/bin/wyrmroot-cc` wrapper, the test programs and `out/sdk-manifest.toml`, which records every input revision and output hash.
 
 ```sh
 python3 -I build.py --fetch
 ```
 
-`--fetch` downloads the pinned musl release when it is not yet in `.cache/sources`.
+`--fetch` downloads the pinned releases that are not yet in `.cache/sources`.
 
 ## Licensing
 
 - **Runtime code linked into programs** (the POSIX layer, startup objects, generated service bindings): `GPL-3.0-or-later WITH Classpath-exception-2.0` (`LICENSES/GPL-3.0-or-later.txt`, `LICENSES/Classpath-exception-2.0.txt`). A program may link it and be distributed under the program's own terms; changes to the runtime itself stay under the GPL.
 - **Build tooling:** `GPL-3.0-or-later`.
-- **Third-party sources** such as musl are pinned by revision and keep their upstream licenses.
+- **Third-party sources** (musl, zlib, Lua) are pinned by release and hash and keep their upstream licenses. zlib's license is installed with it in `share/licenses/zlib`.
 
-Everything else linked into a program carries a matching exception or a permissive license: Wyrmroot's protocol codecs (`wyrmroot-startup-proto`, `wyrmroot-stream-proto`, `wyrmroot-fs-proto`) and Deepwyrm's `deepwyrm-abi` and `deepwyrm-syscall` are licensed `… WITH Classpath-exception-2.0`; musl is MIT; compiler-rt is `Apache-2.0 WITH LLVM-exception`.
+Everything else linked into a program carries a matching exception or a permissive license: Wyrmroot's protocol codecs (`wyrmroot-startup-proto`, `wyrmroot-stream-proto`, `wyrmroot-fs-proto`) and Deepwyrm's `deepwyrm-abi` and `deepwyrm-syscall` are licensed `… WITH Classpath-exception-2.0`; musl is MIT; zlib is Zlib; compiler-rt is `Apache-2.0 WITH LLVM-exception`.
 
 The project-wide rule is in the root `LICENSING_POLICY.md`.

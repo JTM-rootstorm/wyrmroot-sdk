@@ -848,8 +848,11 @@ impl Process {
     }
 
     /// `pages` zeroed pages from the arenas, mapping a new arena when none
-    /// has room: 4 MiB, or the request if larger, or only the request once
-    /// the job's page budget is nearly spent.
+    /// has room: 4 MiB, or the request if larger. A refused arena is halved
+    /// until it maps, never below the request: the kernel bounds both the
+    /// job's page budget and the pages one `map` call can publish, and an
+    /// arena only as large as one small request would spend one of the
+    /// job's four MemoryObjects on it.
     fn arena_allocate<N: Native>(
         &mut self,
         native: &mut N,
@@ -873,7 +876,9 @@ impl Process {
         let base = loop {
             match native.map_anonymous(root, 0, size * PAGE_SIZE, read_write, false) {
                 Ok(base) => break base,
-                Err(DW_STATUS_NO_RESOURCES | DW_STATUS_NO_MEMORY) if size > pages => size = pages,
+                Err(DW_STATUS_NO_RESOURCES | DW_STATUS_NO_MEMORY) if size > pages => {
+                    size = (size / 2).max(pages);
+                }
                 Err(DW_STATUS_ACCESS_DENIED) => return Err(EACCES),
                 Err(_) => return Err(ENOMEM),
             }

@@ -11,8 +11,9 @@ which records every input revision and output hash. Inputs are pinned in
 sdk.toml. Nothing is installed outside this directory, and no guest program
 is ever run on the host: programs are only inspected.
 
---fetch downloads the pinned musl release into .cache/sources if it is
-missing. The download is checked against the pinned hash before use.
+--fetch downloads the pinned musl, zlib and Lua releases into
+.cache/sources if they are missing. Every archive is checked against its
+pinned hash before use.
 """
 
 import hashlib
@@ -53,7 +54,16 @@ PORT_ARCH_FILES = ("syscall_arch.h", "crt_arch.h")
 ALLOWED_PROGRAM_HEADERS = {"PHDR", "LOAD", "GNU_STACK", "TLS"}
 FORBIDDEN_INSTRUCTIONS = ("syscall", "sysenter", "int $0x80")
 
-PROGRAMS = {"hello": ["programs/hello.c"]}
+# Upstream sources the SDK builds, by sdk.toml section.
+SOURCES = ("musl", "zlib", "lua")
+# zlib's library sources (its Makefile's OBJZ and OBJG).
+ZLIB_SOURCES = (
+    "adler32.c", "crc32.c", "deflate.c", "infback.c", "inffast.c", "inflate.c",
+    "inftrees.c", "trees.c", "zutil.c", "compress.c", "uncompr.c", "gzclose.c",
+    "gzlib.c", "gzread.c", "gzwrite.c",
+)
+# Lua's interpreter: every source but the compiler's.
+LUA_EXCLUDED = {"luac.c"}
 
 
 def fail(message):
@@ -121,7 +131,10 @@ class Inputs:
         self.toolchain = PROJECT / rust["toolchain"]
         self.host_cargo = Path(rust["host_toolchain"]) / "cargo"
         self.cargo_home = PROJECT / rust["cargo_home"]
-        self.musl_archive = CACHE / "sources" / f"musl-{self.pins['musl']['version']}.tar.gz"
+        self.archives = {
+            name: CACHE / "sources" / f"{name}-{self.pins[name]['version']}.tar.gz"
+            for name in SOURCES
+        }
 
     def tool(self, name):
         return self.tools / name
@@ -146,17 +159,24 @@ class Inputs:
             fail(f"posix/Cargo.toml must pin deepwyrm-syscall at Wyrmroot's {deepwyrm}")
         self.deepwyrm = deepwyrm
 
-    def fetch_musl(self, allowed):
-        musl = self.pins["musl"]
-        if not self.musl_archive.is_file():
-            if not allowed:
-                fail(f"{self.musl_archive} is missing; run with --fetch to download {musl['url']}")
-            self.musl_archive.parent.mkdir(parents=True, exist_ok=True)
-            partial = self.musl_archive.with_suffix(".partial")
-            run(["curl", "-sSfL", "-o", partial, musl["url"]])
-            partial.rename(self.musl_archive)
-        if sha256(self.musl_archive) != musl["sha256"]:
-            fail(f"{self.musl_archive} does not match the pinned hash")
+    def fetch(self, allowed):
+        for name in SOURCES:
+            pin, archive = self.pins[name], self.archives[name]
+            if not archive.is_file():
+                if not allowed:
+                    fail(f"{archive} is missing; run with --fetch to download {pin['url']}")
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                partial = archive.with_suffix(".partial")
+                run(["curl", "-sSfL", "-o", partial, pin["url"]])
+                partial.rename(archive)
+            if sha256(archive) != pin["sha256"]:
+                fail(f"{archive} does not match the pinned hash")
+
+    def unpack(self, name, build):
+        """Unpacks a pinned archive into `build`; its top directory."""
+        with tarfile.open(self.archives[name]) as archive:
+            archive.extractall(build, filter="data")
+        return build / f"{name}-{self.pins[name]['version']}"
 
 
 def fresh(path):
@@ -236,9 +256,7 @@ def build_posix(inputs, build):
 
 def port_musl(inputs, build, header):
     step("musl: unpack and port")
-    with tarfile.open(inputs.musl_archive) as archive:
-        archive.extractall(build, filter="data")
-    tree = build / f"musl-{inputs.pins['musl']['version']}"
+    tree = inputs.unpack("musl", build)
     arch = tree / "arch" / "wyrmroot_x86_64"
     shutil.copytree(tree / "arch" / "x86_64", arch)
     for name in PORT_ARCH_FILES:
@@ -369,16 +387,48 @@ def inspect_program(inputs, path):
     return {"program_headers": kinds, "syscalls": kernel_entries(inputs, path)}
 
 
-def build_programs(inputs, wrapper):
+def build_zlib(inputs, wrapper, build, sysroot):
+    """zlib as the sysroot's libz.a, with its headers and license."""
+    step("zlib: libz.a")
+    tree = inputs.unpack("zlib", build)
+    objects = build / "zlib-objects"
+    objects.mkdir()
+    for source in ZLIB_SOURCES:
+        run([wrapper, "-O2", "-DHAVE_UNISTD_H", "-DHAVE_STDARG_H", "-c",
+             "-o", objects / source.replace(".c", ".o"), tree / source])
+    library = sysroot / "lib" / "libz.a"
+    run([inputs.tool("llvm-ar"), "rcs", library,
+         *[objects / source.replace(".c", ".o") for source in ZLIB_SOURCES]])
+    for header in ("zlib.h", "zconf.h"):
+        shutil.copyfile(tree / header, sysroot / "include" / header)
+    licenses = sysroot / "share" / "licenses" / "zlib"
+    licenses.mkdir(parents=True)
+    shutil.copyfile(tree / "LICENSE", licenses / "LICENSE")
+    return tree, library
+
+
+def build_programs(inputs, wrapper, build, zlib):
+    """The test programs dev-boot runs: our hello, zlib's own example, and
+    the Lua interpreter with its test script."""
     step("test programs")
     programs = OUT / "programs"
     programs.mkdir()
+    lua = inputs.unpack("lua", build) / "src"
+    ours = ["-O2", "-Wall", "-Wextra", "-Werror"]
+    upstream = ["-O2", "-Wall"]
+    builds = {
+        "hello": ours + [SDK / "programs" / "hello.c"],
+        "zlib-example": upstream + [zlib / "test" / "example.c", "-lz"],
+        "lua": upstream + ["-std=gnu99", "-DLUA_USE_POSIX"]
+               + sorted(path for path in lua.glob("*.c") if path.name not in LUA_EXCLUDED)
+               + ["-lm"],
+    }
     results = {}
-    for name, sources in PROGRAMS.items():
+    for name, arguments in builds.items():
         output = programs / f"{name}.elf"
-        run([wrapper, "-O2", "-Wall", "-Wextra", "-Werror", "-o", output,
-             *[SDK / source for source in sources]])
+        run([wrapper, "-o", output, *arguments])
         results[name] = inspect_program(inputs, output) | {"sha256": sha256(output)}
+    shutil.copyfile(SDK / "programs" / "test.lua", programs / "test.lua")
     return results
 
 
@@ -406,11 +456,16 @@ def write_manifest(inputs, sysroot, header, builtins, programs):
         f'rustc_sha256 = "{inputs.pins["rust"]["rustc_sha256"]}"',
         f'musl = "{inputs.pins["musl"]["version"]}"',
         f'musl_sha256 = "{inputs.pins["musl"]["sha256"]}"',
+        f'zlib = "{inputs.pins["zlib"]["version"]}"',
+        f'zlib_sha256 = "{inputs.pins["zlib"]["sha256"]}"',
+        f'lua = "{inputs.pins["lua"]["version"]}"',
+        f'lua_sha256 = "{inputs.pins["lua"]["sha256"]}"',
         "",
         "[outputs]",
     ]
     for path in [sysroot / "lib" / "libc.a", sysroot / "lib" / "crt1.o",
-                 sysroot / "lib" / "crti.o", sysroot / "lib" / "crtn.o", header, builtins]:
+                 sysroot / "lib" / "crti.o", sysroot / "lib" / "crtn.o",
+                 sysroot / "lib" / "libz.a", header, builtins, OUT / "programs" / "test.lua"]:
         lines.append(f'"{path.relative_to(OUT) if OUT in path.parents else path.name}" = "{sha256(path)}"')
     for name, result in programs.items():
         lines += ["", f"[programs.{name}]",
@@ -426,7 +481,7 @@ def main():
         fail("usage: build.py [--fetch]")
     inputs = Inputs()
     inputs.check()
-    inputs.fetch_musl(arguments == ["--fetch"])
+    inputs.fetch(arguments == ["--fetch"])
     fresh(OUT)
     build = fresh(OUT / "build")
     sysroot = fresh(OUT / "sysroot")
@@ -439,7 +494,8 @@ def main():
     resource = install_resources(inputs, sysroot, builtins)
     check_no_kernel_entry(inputs, sysroot)
     wrapper = write_wrapper(inputs, sysroot, resource)
-    programs = build_programs(inputs, wrapper)
+    zlib, _ = build_zlib(inputs, wrapper, build, sysroot)
+    programs = build_programs(inputs, wrapper, build, zlib)
     write_manifest(inputs, sysroot, sysroot / "include" / "wr_posix.h",
                    resource / "lib" / TARGET / "libclang_rt.builtins.a", programs)
     step(f"done: {OUT}")

@@ -358,14 +358,30 @@ fn the_arenas_stop_at_the_job_budget() {
 }
 
 #[test]
-fn a_nearly_spent_budget_maps_only_the_request() {
+fn a_refused_arena_is_halved_until_it_maps() {
+    // The kernel refuses large maps (its page budget, or the pages one map
+    // call can publish): the arena halves, but stays an arena, so small
+    // requests share it rather than each spending a MemoryObject (found on
+    // Wyrmroot, 2026-11-12: zlib's deflateInit ran out after four).
     let (mut fake, mut process) = setup();
     fake.map_limit = Some(64 * 1024);
     let anonymous = MAP_PRIVATE | MAP_ANONYMOUS;
-    let address = process
+    let first = process
         .mmap(&mut fake, 0, 4096, PROT_READ, anonymous)
         .unwrap() as u64;
-    assert_eq!(fake.mappings, [(address, 4096, RW)]);
+    assert_eq!(fake.mappings, [(first, 64 * 1024, RW)]);
+    for page in 1..16 {
+        let address = process
+            .mmap(&mut fake, 0, 4096, PROT_READ, anonymous)
+            .unwrap() as u64;
+        assert_eq!(address, first + page * 4096);
+    }
+    assert_eq!(fake.mappings.len(), 1);
+    // Never below the request: a request the kernel refuses is ENOMEM.
+    assert_eq!(
+        process.mmap(&mut fake, 0, 128 * 1024, PROT_READ, anonymous),
+        Err(ENOMEM)
+    );
 }
 
 #[test]
