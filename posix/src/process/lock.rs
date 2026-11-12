@@ -97,7 +97,9 @@ impl Process {
             .iter()
             .position(Option::is_none)
             .ok_or(ENOLCK)?;
-        let channel = node::reopen(native, request.channel, &mut self.scratch, request.reopen)?;
+        // No Channel for the lock is no lock, whatever ran out.
+        let channel = node::reopen(native, request.channel, &mut self.scratch, request.reopen)
+            .map_err(|_| ENOLCK)?;
         match self.set_lock(native, channel, request.lock, waiting) {
             Ok(done) => {
                 self.lock_owners[slot] = Some(LockOwner { file, channel });
@@ -145,7 +147,10 @@ impl Process {
         let start = base.checked_add(flock.l_start).ok_or(EOVERFLOW)?;
         // A negative length covers the bytes before `start`.
         let (start, length) = if flock.l_len < 0 {
-            (start.checked_add(flock.l_len).ok_or(EINVAL)?, -flock.l_len)
+            (
+                start.checked_add(flock.l_len).ok_or(EINVAL)?,
+                flock.l_len.checked_neg().ok_or(EINVAL)?,
+            )
         } else {
             (start, flock.l_len)
         };

@@ -62,6 +62,8 @@ pub struct Fake {
     /// At this clock reading, a sleep releases this lock owner's locks, as
     /// another process unlocking would.
     pub release_at: Option<(u64, u64)>,
+    /// The filesystem has no node slot for an OPEN of a node again.
+    pub refuse_reopen: bool,
 }
 
 impl Fake {
@@ -385,6 +387,16 @@ impl Fake {
                 let opened = transfers[0].handle.0;
                 let new_client = self.peers[&opened];
                 let wants_write = flags & OPEN_WRITE != 0;
+                if self.refuse_reopen {
+                    return self.reply(
+                        new_client,
+                        id,
+                        Body::OnOpen {
+                            status: Status::NoResources,
+                            attr: None,
+                        },
+                    );
+                }
                 if wants_write && !write {
                     return self.reply(
                         new_client,

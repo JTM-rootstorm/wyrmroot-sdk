@@ -664,6 +664,8 @@ fn lock_requests_are_checked_against_the_descriptor() {
         (reader, flock(F_RDLCK, -1, 1), EINVAL),
         (reader, flock(F_RDLCK, 0, -1), EINVAL),
         (reader, flock(F_RDLCK, i64::MAX, 2), EOVERFLOW),
+        // W10 review D3: a length that cannot be negated.
+        (reader, flock(F_RDLCK, 0, i64::MIN), EINVAL),
     ] {
         assert_eq!(
             process.fcntl_lock(&mut fake, fd, F_SETLK, &mut request),
@@ -762,6 +764,21 @@ fn a_waiting_lock_is_taken_once_the_holder_lets_go() {
     assert_eq!(
         process.fcntl_lock(&mut fake, fd, F_SETLK, &mut flock(F_UNLCK, 0, 0)),
         Ok(0)
+    );
+    assert_eq!(fake.locks.iter().count(), 0);
+}
+
+#[test]
+fn a_lock_without_room_for_its_channel_is_enolck() {
+    // W10 review D4: not EMFILE or ENFILE, which fcntl never returns.
+    let (mut fake, mut process) = setup();
+    fake.put("/db", FsNode::File(Vec::new()));
+    let fd = open(&mut fake, &mut process, "/db", O_RDWR).unwrap();
+    fake.refuse_reopen = true;
+    let mut write = flock(F_WRLCK, 0, 0);
+    assert_eq!(
+        process.fcntl_lock(&mut fake, fd, F_SETLK, &mut write),
+        Err(ENOLCK)
     );
     assert_eq!(fake.locks.iter().count(), 0);
 }
