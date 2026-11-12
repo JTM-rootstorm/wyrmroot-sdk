@@ -1,0 +1,31 @@
+# The SDK's pinned inputs. `build.py` reads this file, refuses inputs that
+# do not match it, and records what it used in out/sdk-manifest.toml.
+schema = "wyrmroot-sdk-inputs-v1"
+target = "x86_64-unknown-wyrmroot"
+
+[musl]
+version = "1.2.6"
+url = "https://musl.libc.org/releases/musl-1.2.6.tar.gz"
+sha256 = "d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a"
+# The release signature was checked against musl's key on 2026-11-12; the
+# hash above is the pin from then on.
+signing_key = "8364 8929 0BB6 B70F 99FF  DA05 56BC DB59 3020 450F"
+license = "MIT"
+
+[llvm]
+# clang, lld and compiler-rt: the fork's `wyrmroot` line, as built for
+# LLVM-TC2-WYRMROOT-PSABI-002 (root TOOLCHAIN_LLVM_FORK_RULES.md).
+revision = "12d10f0ff1f0ccb52ea3888b913bb052f3cc3332"
+build = ".tmp/llvm-tc2-build"
+clang_sha256 = "aa4ec2029a01ce9fbfed09c6db6ad5bc92944e4a664a29a5baca462553b960d0"
+resource_version = "22"
+# Archive and object tools are the host's pinned LLVM 22 (Gentoo package).
+host_tools = "/usr/lib/llvm/22/bin"
+
+[rust]
+# The accepted Rust fork toolchain that builds libwrposix.a.
+toolchain = "artifacts/toolchains/accepted/RUST-TC2-WYRMROOT-PSABI-008/toolchains/wyrmroot-1.97.1-d54c16b7"
+rustc_sha256 = "32ffeaa4f1e2ed800dc72a5c1b51ed33d792749a3ac2b78feed268d16245335a"
+# Host tests and the header generator use Wyrmroot's host toolchain.
+host_toolchain = "/opt/rust-bin-1.98.1/bin"
+cargo_home = ".tmp/cargo-home/offline-v1"

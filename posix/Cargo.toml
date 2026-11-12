@@ -1,0 +1,49 @@
+[package]
+name = "wyrmroot-posix"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
+description = "The Wyrmroot POSIX layer under the SDK's C library (libwrposix.a)"
+
+# The SDK build turns the library into `libwrposix.a` with
+# `cargo rustc --crate-type staticlib` for x86_64-unknown-wyrmroot; host
+# builds are for unit tests and the header generator only.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "wr-posix-header"
+path = "src/bin/header.rs"
+required-features = ["header"]
+test = false
+
+[features]
+default = []
+# The host program that writes `wr_posix.h` from the export table.
+header = []
+
+# Wyrmroot's protocol crates are used from the sibling checkout, so every
+# encoding is defined once (root `CLAUDE.md` §7). The SDK build records the
+# exact Wyrmroot revision, and requires `deepwyrm-syscall` to be the revision
+# Wyrmroot pins (`wyrmroot/toolchain/versions.toml`).
+[dependencies]
+deepwyrm-syscall = { git = "https://github.com/JTM-rootstorm/deepwyrm.git", rev = "a1847cb53ce9d7193f8e9b8261a5b9adf402063e" }
+wyrmroot-loader = { path = "../../wyrmroot/crates/wyrmroot-loader" }
+wyrmroot-stream-proto = { path = "../../wyrmroot/crates/wyrmroot-stream-proto" }
+wyrmroot-fs-proto = { path = "../../wyrmroot/crates/wyrmroot-fs-proto" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+codegen-units = 1
+debug = false
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("wyrmroot"))'] }
+
+[workspace]

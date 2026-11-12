@@ -12,6 +12,20 @@ When complete, the SDK will contain:
 
 Native first-party Wyrmroot services do not use this SDK; they stay libc-free.
 
+## Layout and build
+
+- `posix/`: the Wyrmroot POSIX layer, a Rust `no_std` crate built into `libwrposix.a`. It exports one `__wr_*` C function per operation; `wr_posix.h` is generated from it.
+- `musl/`: the musl port, `arch/wyrmroot_x86_64`. Its `syscall_arch.h` sends every musl system call to a dispatcher that calls the POSIX layer; no musl code enters the kernel.
+- `programs/`: test programs built against the SDK.
+- `sdk.toml`: the pinned inputs (musl release, LLVM fork revision and build, Rust fork toolchain).
+- `build.py`: builds everything into `out/`: the sysroot, the `out/bin/wyrmroot-cc` wrapper, the test programs and `out/sdk-manifest.toml`, which records every input revision and output hash.
+
+```sh
+python3 -I build.py --fetch
+```
+
+`--fetch` downloads the pinned musl release when it is not yet in `.cache/sources`.
+
 ## Licensing
 
 - **Runtime code linked into programs** (the POSIX layer, startup objects, generated service bindings): `GPL-3.0-or-later WITH Classpath-exception-2.0` (`LICENSES/GPL-3.0-or-later.txt`, `LICENSES/Classpath-exception-2.0.txt`). A program may link it and be distributed under the program's own terms; changes to the runtime itself stay under the GPL.
