@@ -113,12 +113,20 @@ pub fn open<N: Native>(
         });
     }
     let outcome = receive(native, client, scratch).and_then(|used| {
-        match node::parse(&scratch.reply[..used], 0).map(|message| message.body) {
-            Ok(Body::OnOpen {
-                status: Status::Ok,
-                attr: Some(attr),
+        match node::parse(&scratch.reply[..used], 0) {
+            Ok(message) if message.transaction_id != transaction => Err(EIO),
+            Ok(node::Message {
+                body:
+                    Body::OnOpen {
+                        status: Status::Ok,
+                        attr: Some(attr),
+                    },
+                ..
             }) => Ok(attr),
-            Ok(Body::OnOpen { status, .. }) => Err(from_fs(status)),
+            Ok(node::Message {
+                body: Body::OnOpen { status, .. },
+                ..
+            }) => Err(from_fs(status)),
             _ => Err(EIO),
         }
     });

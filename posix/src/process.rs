@@ -902,6 +902,16 @@ impl Process {
         if length == 0 {
             return Ok(0);
         }
+        // Arena pages stay read-write: they are reused and zeroed through
+        // that mapping. Memory a program will protect must be mapped
+        // executable or fixed, which is direct.
+        if self
+            .arenas
+            .place(address, round_pages(length).ok_or(ENOMEM)?)
+            != Place::Outside
+        {
+            return Err(ENOTSUP);
+        }
         let length = round_pages(length).ok_or(ENOMEM)?;
         let protections = protections(prot)?;
         native

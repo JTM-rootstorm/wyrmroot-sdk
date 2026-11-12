@@ -492,9 +492,11 @@ exports! {
         // has no effect (design §9).
         let _ = (how, set);
         r((|| {
-            // SAFETY: forwarded from the caller's contract.
-            let old = unsafe { user_buffer(old, size)? };
-            old.fill(0);
+            // A null old set asks for nothing back.
+            if !old.is_null() {
+                // SAFETY: forwarded from the caller's contract.
+                unsafe { user_buffer(old, size)? }.fill(0);
+            }
             Ok(0)
         })())
     }

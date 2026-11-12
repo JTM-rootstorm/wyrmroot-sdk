@@ -51,6 +51,8 @@ pub struct Fake {
     pub zeroed: Vec<(u64, u64)>,
     /// Mappings larger than this many bytes fail with NO_RESOURCES.
     pub map_limit: Option<u64>,
+    /// The filesystem answers OPEN with another transaction's id.
+    pub wrong_open_transaction: bool,
 }
 
 impl Fake {
@@ -242,6 +244,7 @@ impl Fake {
         };
         let server = transfers[0].handle.0;
         let client = self.peers[&server];
+        let transaction = message.transaction_id + u64::from(self.wrong_open_transaction);
         match self.open(flags, path) {
             Ok(attr) => {
                 self.nodes.insert(
@@ -253,7 +256,7 @@ impl Fake {
                 );
                 self.reply(
                     client,
-                    message.transaction_id,
+                    transaction,
                     Body::OnOpen {
                         status: Status::Ok,
                         attr: Some(attr),
@@ -262,7 +265,7 @@ impl Fake {
             }
             Err(status) => self.reply(
                 client,
-                message.transaction_id,
+                transaction,
                 Body::OnOpen { status, attr: None },
             ),
         }

@@ -310,6 +310,17 @@ fn anonymous_memory_comes_from_arenas_and_is_zeroed_on_reuse() {
     assert_eq!(again, first);
     assert_eq!(fake.zeroed, [(first, 8192)]);
     assert_eq!(process.munmap(&mut fake, first + 1, 8192), Err(EINVAL));
+    // Arena pages cannot be protected: they are zeroed for reuse through
+    // their read-write mapping (security review M1).
+    assert_eq!(
+        process.mprotect(&mut fake, first, 4096, PROT_READ),
+        Err(ENOTSUP)
+    );
+    assert_eq!(
+        process.mprotect(&mut fake, first + ARENA - 4096, 8192, PROT_READ),
+        Err(ENOTSUP)
+    );
+    assert_eq!(fake.mappings, [(first, ARENA, RW)]);
     // A range that would split an arena is refused.
     assert_eq!(
         process.munmap(&mut fake, first + ARENA - 4096, 8192),
@@ -507,4 +518,15 @@ fn clocks_and_sleeps_use_the_monotonic_clock() {
         nanoseconds: 0,
     };
     assert_eq!(process.nanosleep(&mut fake, &negative), Err(EINVAL));
+}
+
+#[test]
+fn an_open_answered_for_another_transaction_fails_closed() {
+    let (mut fake, mut process) = setup();
+    fake.put("/f", FsNode::File(b"x".to_vec()));
+    fake.wrong_open_transaction = true;
+    let closed = fake.closed().len();
+    assert_eq!(open(&mut fake, &mut process, "/f", O_RDONLY), Err(EIO));
+    // The new node Channel is closed, not leaked.
+    assert_eq!(fake.closed().len(), closed + 1);
 }
