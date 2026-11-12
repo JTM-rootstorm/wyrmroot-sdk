@@ -19,6 +19,9 @@ pub const ROOT: DwHandle = DwHandle(0x6000);
 pub const PAGE_ENTRIES: usize = 2;
 /// The filesystem identity the fake's nodes carry.
 pub const FILESYSTEM: u64 = 0xf5;
+/// The vfsd client connection every node of the process under test was
+/// opened through.
+pub const CLIENT: u64 = 1;
 
 #[derive(Clone, Debug)]
 pub enum FsNode {
@@ -383,7 +386,11 @@ impl Fake {
             }
             // Only this node again: what the POSIX layer's lock Channels
             // use. Access never grows.
-            Body::Open { flags, path: b"" } => {
+            Body::Open {
+                flags,
+                path: b"",
+                client: 0,
+            } => {
                 let opened = transfers[0].handle.0;
                 let new_client = self.peers[&opened];
                 let wants_write = flags & OPEN_WRITE != 0;
@@ -424,9 +431,9 @@ impl Fake {
                     },
                 );
             }
-            Body::Lock { lock, flags, group } => {
+            Body::Lock { lock, flags } => {
                 let file = self.attr(&path, false).unwrap().id;
-                let outcome = self.locks.request(client, file, lock, flags, group, id);
+                let outcome = self.locks.request(client, CLIENT, file, lock, flags, id);
                 if outcome == Outcome::Waiting {
                     // Nothing answers a wait unless the holder lets go.
                     if let Some(holder) = self.release_when_waited.take() {
@@ -454,9 +461,9 @@ impl Fake {
 
 fn lock_reply(outcome: Outcome) -> Body<'static> {
     match outcome {
-        Outcome::Granted(group) => Body::Status {
+        Outcome::Granted => Body::Status {
             status: Status::Ok,
-            value: group,
+            value: 0,
         },
         outcome => Body::Status {
             status: match outcome {

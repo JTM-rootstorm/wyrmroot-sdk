@@ -127,7 +127,11 @@ pub fn reopen<N: Native>(
     let size = node::encode(
         &node::Message {
             transaction_id: transaction,
-            body: Body::Open { flags, path: b"" },
+            body: Body::Open {
+                flags,
+                path: b"",
+                client: 0,
+            },
         },
         &mut scratch.request,
     )
