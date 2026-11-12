@@ -20,26 +20,21 @@ name = "wyrmroot-fs-proto"
 version = "0.0.0"
 
 [[package]]
-name = "wyrmroot-loader"
-version = "0.0.0"
-dependencies = [
- "deepwyrm-syscall",
- "wyrmroot-registry-proto",
-]
-
-[[package]]
 name = "wyrmroot-posix"
 version = "0.0.0"
 dependencies = [
  "deepwyrm-syscall",
  "wyrmroot-fs-proto",
- "wyrmroot-loader",
+ "wyrmroot-startup-proto",
  "wyrmroot-stream-proto",
 ]
 
 [[package]]
-name = "wyrmroot-registry-proto"
+name = "wyrmroot-startup-proto"
 version = "0.0.0"
+dependencies = [
+ "deepwyrm-syscall",
+]
 
 [[package]]
 name = "wyrmroot-stream-proto"

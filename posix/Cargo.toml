@@ -29,7 +29,7 @@ header = []
 # Wyrmroot pins (`wyrmroot/toolchain/versions.toml`).
 [dependencies]
 deepwyrm-syscall = { git = "https://github.com/JTM-rootstorm/deepwyrm.git", rev = "a1847cb53ce9d7193f8e9b8261a5b9adf402063e" }
-wyrmroot-loader = { path = "../../wyrmroot/crates/wyrmroot-loader" }
+wyrmroot-startup-proto = { path = "../../wyrmroot/crates/wyrmroot-startup-proto" }
 wyrmroot-stream-proto = { path = "../../wyrmroot/crates/wyrmroot-stream-proto" }
 wyrmroot-fs-proto = { path = "../../wyrmroot/crates/wyrmroot-fs-proto" }
 

@@ -12,7 +12,7 @@ use crate::native::Native;
 use deepwyrm_syscall::*;
 use wyrmroot_fs_proto::node::{self, Attr, Body};
 use wyrmroot_fs_proto::{MAX_HANDLES, Status, namespace};
-use wyrmroot_loader::launch::CHILD_CHANNEL_RIGHTS;
+use wyrmroot_startup_proto::CHILD_CHANNEL_RIGHTS;
 
 /// Rights for a new node Channel pair: the server end is moved to `vfsd`.
 const NODE_RIGHTS: DwRights = DwRights(CHILD_CHANNEL_RIGHTS.0 | DW_RIGHT_TRANSFER.0);

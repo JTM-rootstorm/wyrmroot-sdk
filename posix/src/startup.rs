@@ -13,8 +13,8 @@ use crate::errno::Result;
 use crate::native::Native;
 use crate::process::Process;
 use deepwyrm_syscall::*;
-use wyrmroot_loader::image::STARTUP_ABI_V2;
-use wyrmroot_loader::launch::{HEADER_BYTES, LaunchProfile, encode_ready_for_profile, parse_init};
+use wyrmroot_startup_proto::STARTUP_ABI_V2;
+use wyrmroot_startup_proto::{HEADER_BYTES, LaunchProfile, encode_ready_for_profile, parse_init};
 
 /// Where startup failed; the process exits with `0x5750_0000 | step`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,7 +131,7 @@ pub fn find_pwd<'a>(mut environment: impl Iterator<Item = &'a [u8]>) -> Option<&
 mod tests {
     use super::*;
     use crate::testing::Fake;
-    use wyrmroot_loader::launch::{CHILD_CHANNEL_RIGHTS, encode_init};
+    use wyrmroot_startup_proto::{CHILD_CHANNEL_RIGHTS, encode_init};
 
     const LAUNCH: DwHandle = DwHandle(0x100);
 
@@ -182,7 +182,7 @@ mod tests {
         let ready = fake.sent(LAUNCH);
         assert_eq!(ready.len(), 1);
         assert!(
-            wyrmroot_loader::launch::parse_ready_for_profile(
+            wyrmroot_startup_proto::parse_ready_for_profile(
                 LaunchProfile::JobV2Namespace,
                 &ready[0],
                 77
