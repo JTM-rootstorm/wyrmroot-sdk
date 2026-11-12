@@ -28,7 +28,7 @@ header = []
 # exact Wyrmroot revision, and requires `deepwyrm-syscall` to be the revision
 # Wyrmroot pins (`wyrmroot/toolchain/versions.toml`).
 [dependencies]
-deepwyrm-syscall = { git = "https://github.com/JTM-rootstorm/deepwyrm.git", rev = "6d4a5ee1e264d4d9eb329f141bb343f25c57c40f" }
+deepwyrm-syscall = { git = "https://github.com/JTM-rootstorm/deepwyrm.git", rev = "7915362be2c3b7aedf4ff8e094b17b2d16990f62" }
 wyrmroot-startup-proto = { path = "../../wyrmroot/crates/wyrmroot-startup-proto" }
 wyrmroot-stream-proto = { path = "../../wyrmroot/crates/wyrmroot-stream-proto" }
 wyrmroot-fs-proto = { path = "../../wyrmroot/crates/wyrmroot-fs-proto" }

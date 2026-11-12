@@ -32,4 +32,6 @@ python3 -I build.py --fetch
 - **Build tooling:** `GPL-3.0-or-later`.
 - **Third-party sources** such as musl are pinned by revision and keep their upstream licenses.
 
+Everything else linked into a program carries a matching exception or a permissive license: Wyrmroot's protocol codecs (`wyrmroot-startup-proto`, `wyrmroot-stream-proto`, `wyrmroot-fs-proto`) and Deepwyrm's `deepwyrm-abi` and `deepwyrm-syscall` are licensed `… WITH Classpath-exception-2.0`; musl is MIT; compiler-rt is `Apache-2.0 WITH LLVM-exception`.
+
 The project-wide rule is in the root `LICENSING_POLICY.md`.
