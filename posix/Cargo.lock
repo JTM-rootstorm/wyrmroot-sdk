@@ -5,12 +5,12 @@ version = 4
 [[package]]
 name = "deepwyrm-abi"
 version = "0.0.0"
-source = "git+https://github.com/JTM-rootstorm/deepwyrm.git?rev=993484a3972a2d64e35263c5e1034712cb359666#993484a3972a2d64e35263c5e1034712cb359666"
+source = "git+https://github.com/JTM-rootstorm/deepwyrm.git?rev=2baaa0442ee11f09ed03c88f698f64a0bd7581aa#2baaa0442ee11f09ed03c88f698f64a0bd7581aa"
 
 [[package]]
 name = "deepwyrm-syscall"
 version = "0.0.0"
-source = "git+https://github.com/JTM-rootstorm/deepwyrm.git?rev=993484a3972a2d64e35263c5e1034712cb359666#993484a3972a2d64e35263c5e1034712cb359666"
+source = "git+https://github.com/JTM-rootstorm/deepwyrm.git?rev=2baaa0442ee11f09ed03c88f698f64a0bd7581aa#2baaa0442ee11f09ed03c88f698f64a0bd7581aa"
 dependencies = [
  "deepwyrm-abi",
 ]

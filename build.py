@@ -50,8 +50,12 @@ MUSL_X86_64_EXCLUDED = {
 PORT_ARCH_FILES = ("syscall_arch.h", "crt_arch.h")
 
 # What the Wyrmroot loader accepts in a program (WYR0_E0 loading contract):
-# static ET_EXEC, x86_64, PT_LOAD (never W+X), PT_PHDR, PT_GNU_STACK, PT_TLS.
-ALLOWED_PROGRAM_HEADERS = {"PHDR", "LOAD", "GNU_STACK", "TLS"}
+# static ET_EXEC, x86_64, PT_LOAD (never W+X), PT_PHDR, PT_GNU_STACK, PT_TLS,
+# and exactly one PT_NOTE holding the Deepwyrm ABI note with the fingerprint
+# Wyrmroot pins (root OS_STACK_ARCHITECTURE_PLAN.md V1). deepwyrm-syscall
+# assembles that note beside its syscall veneer, so it reaches every program
+# through libc.a.
+ALLOWED_PROGRAM_HEADERS = {"PHDR", "LOAD", "GNU_STACK", "TLS", "NOTE"}
 FORBIDDEN_INSTRUCTIONS = ("syscall", "sysenter", "int $0x80")
 
 # Upstream sources the SDK builds, by sdk.toml section.
@@ -392,7 +396,39 @@ def inspect_program(inputs, path):
     unexpected = set(kinds) - ALLOWED_PROGRAM_HEADERS
     if unexpected:
         fail(f"{path.name} has program headers the loader refuses: {sorted(unexpected)}")
+    if kinds.count("NOTE") != 1:
+        fail(f"{path.name} has {kinds.count('NOTE')} PT_NOTE headers; the loader wants one")
+    if abi_note(inputs, path) != pinned_abi_fingerprint():
+        fail(f"{path.name} does not carry the pinned Deepwyrm ABI fingerprint")
     return {"program_headers": kinds, "syscalls": kernel_entries(inputs, path)}
+
+
+def abi_note(inputs, path):
+    """The descriptor of the program's one Deepwyrm note, as hex."""
+    notes = run([inputs.tool("llvm-readelf"), "-n", "-W", path], capture=True)
+    lines = notes.splitlines()
+    found = []
+    for index, line in enumerate(lines):
+        fields = line.split()
+        if fields[:1] != ["Deepwyrm"]:
+            continue
+        for following in lines[index + 1:index + 3]:
+            if "description data:" in following:
+                found.append("".join(following.split("description data:")[1].split()))
+                break
+        else:
+            # Some readelf versions print the data on the owner line itself.
+            if "description data:" in line:
+                found.append("".join(line.split("description data:")[1].split()))
+    if len(found) != 1:
+        fail(f"{path.name} has {len(found)} Deepwyrm ABI notes; the loader wants one")
+    return found[0]
+
+
+def pinned_abi_fingerprint():
+    """Wyrmroot's pinned fingerprint, toolchain/versions.toml [deepwyrm]."""
+    with open(WYRMROOT / "toolchain" / "versions.toml", "rb") as handle:
+        return tomllib.load(handle)["deepwyrm"]["abi_fingerprint"]
 
 
 def build_zlib(inputs, wrapper, build, sysroot):
